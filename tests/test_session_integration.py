@@ -44,6 +44,16 @@ TIMEOUT = 5.0  # 개별 run()의 행 방지 상한
 # 테스트용 LLM 스텁 — 스크립트 소비형(소진 후 조용한 END 응답)
 # ---------------------------------------------------------------------------
 
+class RequestStep:
+    """현재 LLMRequest를 검사해 응답을 만드는 스크립트 단계."""
+
+    def __init__(self, responder) -> None:
+        self._responder = responder
+
+    def respond(self, request):
+        return self._responder(request)
+
+
 class ScriptedLLM:
     """스크립트를 순서대로 소비하는 LLMClient 스텁.
 
@@ -66,7 +76,9 @@ class ScriptedLLM:
             self._i += 1
             if isinstance(item, BaseException):  # LLMError 주입 = raise
                 raise item
-            if callable(item):
+            if isinstance(item, RequestStep):
+                item = item.respond(request)
+            elif callable(item):
                 item = item()
             if hasattr(item, "__await__"):
                 item = await item
@@ -335,6 +347,89 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             tool_outputs,
         )
 
+    async def test_voting_call_injects_missing_proposal_body(self) -> None:
+        """inbox에 제안 메시지가 없어도 캡처한 voting 스냅샷을 요청에 넣는다."""
+        body = "UNIQUE PROPOSAL BODY: compare, retry, DLQ, migration, rollback"
+        seen_requests = []
+
+        def inspect_and_approve(request):
+            seen_requests.append(request)
+            return _vote("approve")
+
+        manager, _, _ = self._build(
+            [
+                ("writer", [_text()]),
+                ("reviewer", [RequestStep(inspect_and_approve)]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        manager.submit_result("writer", body)
+        # 실 결함의 핵심인 "voting이지만 inbox 본문 없음"을 직접 만든다.
+        manager._bus.drain("reviewer")
+
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        merged = "\n".join(
+            turn.content for turn in seen_requests[0].turns if turn.content
+        )
+        self.assertIn(body, merged)
+        self.assertEqual(merged.count(body), 1)
+        self.assertIn("[result proposal from writer]", merged)
+        self.assertIn("[budget phase: voting]", merged)
+
+    async def test_vote_from_call_started_before_voting_is_retried(self) -> None:
+        """discussion 요청의 늦은 vote는 거부되고 본문을 본 voting 호출이 재투표한다."""
+        discussion_started = asyncio.Event()
+        collector = None
+        voting_requests = []
+        body = "ACTIVE BODY FOR THE REAL VOTING CALL"
+
+        async def late_discussion_vote():
+            discussion_started.set()
+            assert collector is not None
+            await collector.proposal_gate(1).wait()
+            return _vote("approve")
+
+        async def submit_after_discussion_call_starts():
+            await discussion_started.wait()
+            return _submit(body)
+
+        def approve_after_review(request):
+            voting_requests.append(request)
+            return _vote("approve")
+
+        manager, collector, fakes = self._build(
+            [
+                ("writer", [submit_after_discussion_call_starts]),
+                (
+                    "reviewer",
+                    [late_discussion_vote, RequestStep(approve_after_review)],
+                ),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(len(collector.messages(MessageType.VOTE)), 1)
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["reviewer"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        self.assertIn("this call started before voting", tool_outputs)
+        merged = "\n".join(
+            turn.content for turn in voting_requests[0].turns if turn.content
+        )
+        self.assertIn(body, merged)
+        self.assertEqual(merged.count(body), 1)
+        self.assertIn("[budget phase: voting]", merged)
+
     async def test_bogus_proposal_id_vote_gets_corrective_result(self) -> None:
         """지어낸 proposal_id로 투표하면 무시 대신 활성 제안 id를 알려주는 교정
         메시지를 받고, 재투표(id 생략)로 합의가 완료된다 (실 스모크 대응)."""
@@ -342,6 +437,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             [
                 ("writer", [_submit("the deliverable")]),
                 ("analyst", [
+                    _text(),
                     _vote("approve", proposal_id="made-up-id"),
                     _vote("approve"),
                 ]),
@@ -400,7 +496,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
                     _chat("gathering input", recipients=["analyst"]),
                     _submit("the deliverable"),
                 ]),
-                ("analyst", [_text(), _vote("approve")]),
+                ("analyst", [_text(), _text("ack"), _vote("approve")]),
             ],
             idle_timeout=1.0,
             voting_timeout=1.0,
@@ -426,7 +522,10 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         manager, coll, _ = self._build([
             # 제출 v1 -> (park) -> 재제출 v2. 중간 text가 없으면 voting 중 재제출이라 거부됨.
             ("writer", [_submit("draft one"), _submit("draft two final")]),
-            ("analyst", [_vote("reject", reason=reason), _vote("approve")]),
+            (
+                "analyst",
+                [_text(), _vote("reject", reason=reason), _vote("approve")],
+            ),
         ])
         session = await self._run(manager)
 
@@ -886,6 +985,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 (
                     "reviewer",
                     [
+                        _text(),
                         _vote("reject", reason="first defect"),
                         _vote("reject", reason="still defective"),
                     ],

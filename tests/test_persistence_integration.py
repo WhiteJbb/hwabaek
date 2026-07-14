@@ -71,6 +71,7 @@ def _llm_factory(spec: AgentSpec) -> FakeLLMClient:
             text_response("Waiting."),
         ])
     return FakeLLMClient([
+        text_response("Ready to review."),
         tool_response("vote_result", {"decision": "approve"}),
         text_response("Voted."),
         text_response("Waiting."),

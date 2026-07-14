@@ -127,7 +127,7 @@ class SessionManager:
         self._budget_condition = asyncio.Condition()
         self._call_reservations: dict[str, int] = {}
         self._call_phases: dict[str, BudgetPhase] = {}
-        self._call_proposal_ids: dict[str, str] = {}
+        self._call_proposals: dict[str, ResultProposal] = {}
         self._voting_attempts: dict[tuple[str, str], int] = {}
         self._decision_attempts: dict[tuple[BudgetPhase, int, str], int] = {}
         self._decision_unresponsive: set[str] = set()
@@ -411,9 +411,9 @@ class SessionManager:
                     self._call_phases[agent] = self._budget_phase
                     if self._budget_phase is BudgetPhase.VOTING:
                         assert active is not None
-                        self._call_proposal_ids[agent] = active.proposal.id
+                        self._call_proposals[agent] = active.proposal
                     else:
-                        self._call_proposal_ids.pop(agent, None)
+                        self._call_proposals.pop(agent, None)
                     return True
 
                 if self._call_reservations:
@@ -483,6 +483,10 @@ class SessionManager:
             )
         return None
 
+    def _proposal_for_agent(self, agent: str) -> ResultProposal | None:
+        """현재 호출이 검토해야 하는 불변 제안 스냅샷을 반환한다."""
+        return self._call_proposals.get(agent)
+
     def _retry_instruction_for_agent(self, agent: str) -> str | None:
         if self._budget_phase is BudgetPhase.VOTING:
             active = self._consensus.active
@@ -531,8 +535,8 @@ class SessionManager:
 
     def _cancel_voting_calls(self, proposal_id: str) -> None:
         """해소된 제안 버전을 검토 중인 호출만 취소하고 에이전트는 보존한다."""
-        for agent, call_proposal_id in tuple(self._call_proposal_ids.items()):
-            if call_proposal_id != proposal_id:
+        for agent, proposal in tuple(self._call_proposals.items()):
+            if proposal.id != proposal_id:
                 continue
             loop = self._agents.get(agent)
             if loop is not None:
@@ -563,6 +567,15 @@ class SessionManager:
 
     def _guard(self, command: str, sender: str) -> None:
         """상태별 허용 규칙(§17) + 에이전트별 권한(D-027)의 이중 검증."""
+        if (
+            self._session.status is SessionStatus.VOTING
+            and command == "vote_result"
+            and self._call_phases.get(sender) not in (None, BudgetPhase.VOTING)
+        ):
+            raise ToolError(
+                "vote_result rejected: this call started before voting; review "
+                "the active proposal and retry in the voting phase"
+            )
         if self._session.status is SessionStatus.VOTING and command == "send_message":
             raise ToolError(
                 "send_message rejected: voting phase only allows vote_result"
@@ -686,7 +699,10 @@ class SessionManager:
             ) from None
         # proposal_id 생략은 호출 시작 당시 캡처한 제안에 귀속한다. 활성 제안으로
         # 무조건 연결하면 늦은 v1 응답이 이미 열린 v2에 잘못 투표할 수 있다.
-        target_proposal_id = proposal_id or self._call_proposal_ids.get(sender, "")
+        call_proposal = self._call_proposals.get(sender)
+        target_proposal_id = proposal_id or (
+            call_proposal.id if call_proposal is not None else ""
+        )
         try:
             if target_proposal_id:
                 result = self._consensus.register_vote_for(
@@ -1074,6 +1090,9 @@ class _Hooks:
 
     def instruction_for(self, agent: str) -> str | None:
         return self._m._instruction_for_agent(agent)
+
+    def proposal_for(self, agent: str) -> ResultProposal | None:
+        return self._m._proposal_for_agent(agent)
 
     def retry_instruction(self, agent: str) -> str | None:
         return self._m._retry_instruction_for_agent(agent)

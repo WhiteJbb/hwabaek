@@ -2,6 +2,32 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-15 — M5.4 voting 제안 문맥 보장 (fix/voting-proposal-context)
+
+### 실측 원인
+- 완료 세션 `56c92390-000000`에서 v1 본문 3,826자는 정상 저장·브로드캐스트됐고
+  research가 승인했지만, critic은 본문이 제공되지 않았다는 이유로 반려했다.
+  critic이 연속 tool-use 안에서 outer inbox drain 전 voting 호출에 진입하면서
+  단계 지시와 투표 도구만 받고 활성 제안 본문은 받지 못한 경계로 확정했다.
+- v2는 critic 승인 후 research 호출이 120초 동안 반환되지 않아 기권했지만,
+  participating_unanimous의 유효 승인 1표로 정상 완료됐다. 이 지연은 별도 provider
+  응답 문제이며 본 수정은 불필요한 v1 반려와 문맥 없는 투표를 대상으로 한다.
+
+### 수정
+- voting 입장에서 불변 ResultProposal 스냅샷을 캡처한다. AgentLoop는 호출 직전
+  inbox를 drain하고, 그래도 요청 이력에 같은 proposal marker가 없으면 본문과
+  즉시 투표 지시를 직접 주입한다. 정상 inbox 경로에서는 본문이 한 번만 들어간다.
+- discussion/synthesis에서 시작한 요청이 voting 전환 뒤 `vote_result`를 반환하면
+  단계 불일치 도구 오류로 거부하고, 다음 voting 호출이 활성 본문을 읽고 재투표한다.
+
+### 오류/검증
+- 코어 통합 테스트에서 기존 네 경로, 전체 테스트에서 SQLite 영속화 한 경로가
+  discussion에서 시작한 투표를 voting에 적용하는 오래된 경합에 의존함을 발견했다.
+  fixture가 discussion 응답을 먼저 끝낸 뒤 실제 voting 호출에서 투표하도록 수정했다.
+- 제안 메시지가 없는 voting 호출의 본문 fallback, 정상 inbox 경로의 비중복,
+  discussion→voting 늦은 투표 거부·재시도를 신규 밀폐 테스트로 검증했다.
+- 전체 unittest 510개 통과(7.928s), `git diff --check` 통과.
+
 ## 2026-07-14 — M5.3 재투표 호출 세대 격리 (fix/voting-generation-cancel)
 
 ### 실측 원인

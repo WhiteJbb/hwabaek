@@ -19,6 +19,7 @@ from hwabaek.contracts import (
     ContractError,
     Message,
     MessageType,
+    ResultProposal,
     Usage,
 )
 from hwabaek.llm.base import (
@@ -132,6 +133,8 @@ class AgentStateHooks(Protocol):
 
     def instruction_for(self, agent: str) -> str | None: ...
 
+    def proposal_for(self, agent: str) -> ResultProposal | None: ...
+
     def retry_instruction(self, agent: str) -> str | None: ...
 
     def preserve_after_turn_limit(self, agent: str) -> bool: ...
@@ -148,6 +151,21 @@ _TRUNCATION_NOTICE = (
 )
 
 
+def _render_result_proposal(
+    proposer: str, proposal_id: str, content: str
+) -> str:
+    return (
+        f"[result proposal from {proposer}] "
+        f"(proposal_id: {proposal_id})\n{content}\n"
+        "[action required] The session is now VOTING on the proposal "
+        "above. If you have the vote_result tool, cast your vote NOW "
+        "(approve, or reject with a concrete reason); you may omit "
+        "proposal_id to vote on this active proposal. General chat is "
+        "closed during voting. One corrective call is allowed; a member "
+        "that still does not vote is counted as abstaining."
+    )
+
+
 def merge_batch(messages: list[Message]) -> str:
     """수신 배치를 발신자 태깅으로 병합해 하나의 user 턴 본문을 만든다 (§2).
 
@@ -160,14 +178,9 @@ def merge_batch(messages: list[Message]) -> str:
     for message in messages:
         if message.type is MessageType.RESULT_PROPOSAL:
             parts.append(
-                f"[result proposal from {message.sender}] "
-                f"(proposal_id: {message.proposal_id})\n{message.content}\n"
-                "[action required] The session is now VOTING on the proposal "
-                "above. If you have the vote_result tool, cast your vote NOW "
-                "(approve, or reject with a concrete reason); you may omit "
-                "proposal_id to vote on this active proposal. General chat is "
-                "closed during voting. One corrective call is allowed; a member "
-                "that still does not vote is counted as abstaining."
+                _render_result_proposal(
+                    message.sender, message.proposal_id or "", message.content
+                )
             )
         elif message.type is MessageType.VOTE:
             decision = message.vote.value if message.vote else "vote"
@@ -242,6 +255,17 @@ class AgentLoop:
         task.cancel()
         return True
 
+    def _drain_inbox(self) -> bool:
+        """현재까지 도착한 메시지·제어 알림을 이력에 원자적으로 추가한다."""
+        batch = self._bus.drain(self.name)
+        drain_notices = getattr(self._bus, "drain_notices", None)
+        notices = drain_notices(self.name) if drain_notices else []
+        if batch:
+            self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
+        for notice in notices:
+            self._turns.append(Turn(role=Role.USER, content=notice))
+        return bool(batch or notices)
+
     async def run(self) -> None:
         """루프 본체. 세션 종료 시 SessionManager가 태스크를 취소한다."""
         first = Turn(
@@ -278,15 +302,8 @@ class AgentLoop:
             else:
                 self._hooks.on_state(self.name, AgentState.IDLE)
             await self._bus.wait_for_messages(self.name)
-            batch = self._bus.drain(self.name)
-            drain_notices = getattr(self._bus, "drain_notices", None)
-            notices = drain_notices(self.name) if drain_notices else []
-            if not batch and not notices:
+            if not self._drain_inbox():
                 continue
-            if batch:
-                self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
-            for notice in notices:
-                self._turns.append(Turn(role=Role.USER, content=notice))
             await self._think_and_act()
 
     async def _think_and_act(self) -> None:
@@ -301,11 +318,25 @@ class AgentLoop:
             before_call = getattr(self._hooks, "before_call", None)
             if before_call is not None and not await before_call(self.name):
                 return
+            # tool-use 연속 호출 안에서도 단계 전환 중 도착한 제안·투표를 먼저
+            # 반영한다. outer wait 루프로 돌아갈 때까지 inbox를 방치하지 않는다.
+            self._drain_inbox()
             self._hooks.on_state(self.name, AgentState.THINKING)
             self._turns = truncate_history(self._turns, self._history_limit)
             instruction_for = getattr(self._hooks, "instruction_for", None)
             instruction = instruction_for(self.name) if instruction_for else None
             request_turns = tuple(self._turns)
+            proposal_for = getattr(self._hooks, "proposal_for", None)
+            proposal = proposal_for(self.name) if proposal_for else None
+            if proposal is not None:
+                marker = f"(proposal_id: {proposal.id})"
+                if not any(marker in turn.content for turn in self._turns):
+                    request_turns += (Turn(
+                        role=Role.USER,
+                        content=_render_result_proposal(
+                            proposal.proposer, proposal.id, proposal.content
+                        ),
+                    ),)
             if instruction:
                 request_turns += (Turn(role=Role.USER, content=instruction),)
             tools_for = getattr(self._hooks, "tools_for", None)
