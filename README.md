@@ -108,7 +108,8 @@ py -m venv .venv
 - venv는 네이티브 Windows Python(3.11+, `py` 런처)으로 만듭니다 — git-bash의
   MSYS2 python은 venv 레이아웃이 달라 프로젝트 규칙과 어긋납니다 (DecisionLog D-014).
 
-- `OPENAI_API_KEY` 환경변수 또는 ChatGPT subscription 연동(M2 착수 전 검증 예정).
+- 인증: `OPENAI_API_KEY` 환경변수(기본) 또는 ChatGPT subscription OAuth(선택 모드,
+  M2b 예정 — 비공식 경로라 OpenAI 약관 변경 시 제거될 수 있습니다, D-026).
   API 키는 로그·대시보드에 노출되지 않습니다.
 - 서버는 localhost(127.0.0.1) 전용이며, 세션은 동시에 1개만 실행됩니다.
 

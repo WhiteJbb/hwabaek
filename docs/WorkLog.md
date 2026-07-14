@@ -2,6 +2,30 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2a 착수 전 스파이크: 모델 ID 확정 + subscription 연동 검증
+
+### 진행한 작업
+- **GPT-5.6 모델 ID 확정**: 웹 문서가 403이라 최신 openai SDK(2.45.0)를 설치해
+  타입 정의에서 직접 추출 — `gpt-5.6-sol`/`gpt-5.6-terra`/`gpt-5.6-luna`(+별칭
+  `gpt-5.6`). 기존 placeholder `gpt-5.6-terra`와 일치, 코드 변경 없이 "추정"
+  마커만 확정으로 갱신.
+- **subscription 연동 검증** — "작동하지만 비공식" 판정 (Research §6):
+  Codex OAuth(device flow)가 구독 과금 Responses API 호출의 실재 경로
+  (litellm `chatgpt/` 프로바이더 문서화), 단 OpenAI의 공식 서드파티 허용 없음 +
+  Anthropic·Google의 2026년 초 동일 경로 차단 전례 + 구독 백엔드의
+  max_output_tokens/metadata 거부(예산 사전 상한 불가 → 사후 집계 필요) 확인.
+- **결정 (D-026, 사용자)**: 인증 하이브리드 — 어댑터 인증 모드 2종
+  `api_key`(기본, M2a) | `chatgpt_oauth`(M2b 추가). LLMClient 계약 변경 없음.
+  D-008 갱신, Plan 미결 2건 해소, README 고지 추가.
+
+### 오류/이슈
+- 없음.
+
+### 다음 할 일
+- M2a 착수: `feat/m2a-core` 브랜치 — bus / ConsensusEngine / SessionManager /
+  agent 루프 + llm/openai_client(api_key 모드) + Fake LLM 통합 + CLI smoke
+- 기본 팀 초안 사용자 확인 (Plan 미결)
+
 ## 2026-07-14 — M1 머지 (PR #1) + 저장소 이름 변경
 
 ### 진행한 작업

@@ -75,7 +75,8 @@
 
 - 에이전트에 부여할 서버 도구(web_search 등) 통합 방식 — 도구 범위 결정(Plan 미결) 후.
 - 세션 이력이 길어질 때의 컨텍스트 관리(compaction 베타) — M5.
-- ChatGPT subscription OAuth 연동의 기술 상세(스코프, rate limit) — M2 스파이크(§6).
+- ~~ChatGPT subscription OAuth 연동의 기술 상세~~ → 스파이크 완료(§6). 잔여:
+  gpt-5.6의 구독 백엔드 지원 실측 + device flow rate limit — M2b 접목 시.
 - Python asyncio Queue의 원자적 drain 구현 방식 (`get_nowait` 루프 vs 단일 소비자 보장) — M2 bus.
 - OpenAI tool call의 중단·재시도 처리 (부분 tool call 응답, 타임아웃 후 재호출 시 중복 방지) — M2 어댑터.
 - SSE reconnect와 Last-Event-ID의 실무 동작 (브라우저 EventSource 재전송 규약) — M3.
@@ -98,8 +99,9 @@
 - 프롬프트 캐싱: 명시적 cache breakpoint 지원, 최소 캐시 수명 30분.
   GPT-5.6+는 캐시 쓰기 1.25x 과금 / 캐시 읽기 90% 할인 — §2의 Claude 캐싱 전략과
   마찬가지로 "시스템 프롬프트 고정 + 뒤에만 추가" 원칙 적용 가능.
-- 정확한 API 모델 ID(`gpt-5.6-terra` 추정)는 `확실하지 않음` — openai.com 문서가
-  자동화 접근을 403으로 차단해 미확인. 구현 착수 시 공식 모델 문서에서 확인.
+- **모델 ID 확정 (2026-07-14 스파이크)**: `gpt-5.6-sol` / `gpt-5.6-terra` /
+  `gpt-5.6-luna` + 별칭 `gpt-5.6` — openai SDK 2.45.0의 모델 타입 정의에서 직접
+  확인 (웹 문서 403 우회). 기본 모델은 `gpt-5.6-terra` (D-008, contracts.DEFAULT_MODEL).
 
 ### ChatGPT subscription 연동 (D-008의 전제)
 
@@ -107,9 +109,20 @@
 - 단 **"Sign in with ChatGPT"**(OAuth 2.0, BYOS: bring-your-own-subscription) 경로로는
   사용자가 자기 ChatGPT 계정으로 로그인해 구독 quota로 모델을 사용 가능
   (Free/Go/Plus/Pro 지원, 개발자 측 무과금)이라는 조사 결과.
-- `확실하지 않음`: 이 OAuth 경로를 우리 같은 자체 로컬 앱에서 쓸 수 있는지, 멀티 에이전트
-  부하(에이전트 수 × 대화 길이)를 quota/rate limit이 감당하는지 → **M2 착수 전 스파이크**.
-- 폴백: 검증 실패 시 `OPENAI_API_KEY` 과금으로 전환하고 D-008 갱신.
+- **스파이크 결과 (2026-07-14) — "작동하지만 비공식"**:
+  - 경로 실재: **Codex OAuth(device code flow)** 토큰이 구독 과금으로 Responses API를
+    호출하는 유일한 경로. litellm이 `chatgpt/` 프로바이더로 문서화(토큰 로컬 저장,
+    Chat Completions는 Responses로 브릿지), openclaw 등 실사용 사례 존재.
+  - 공식 보장 없음: OpenAI 공식 문서(learn.chatgpt.com/docs/auth)는 Codex 제품 대상만
+    서술 — 서드파티 허용도 금지도 명시하지 않음. **Anthropic(2026-02 약관 금지 →
+    2026-04 과금 강제)·Google(2026-02)이 동일 경로를 차단한 전례** → 소급 차단 리스크.
+  - 기술 제약: 구독 백엔드는 `max_tokens`/`max_output_tokens`/`metadata`를 **거부**
+    (litellm은 strip) → 토큰 예산의 사전 상한 불가, **사후 집계로만 강제** 가능.
+    litellm 문서는 gpt-5.4까지 기재 — 5.6의 구독 백엔드 지원은 실측 필요.
+  - **결정 (D-026)**: 하이브리드 — 어댑터 인증 모드 2종(api_key | chatgpt_oauth).
+    M2a는 api_key(공식·안정), M2b에서 chatgpt_oauth 모드 추가.
 
 출처: openai.com/index/gpt-5-6 (TechCrunch·MarkTechPost 2026-07-09 보도),
-OpenAI Help Center(구독 vs API 과금 분리), openai/codex#10974 (Sign in with ChatGPT).
+OpenAI Help Center(구독 vs API 과금 분리), openai/codex#10974 (Sign in with ChatGPT),
+learn.chatgpt.com/docs/auth (Codex 인증), docs.litellm.ai/docs/providers/chatgpt,
+openai SDK 2.45.0 타입 정의.

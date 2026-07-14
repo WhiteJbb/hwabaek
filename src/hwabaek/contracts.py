@@ -17,7 +17,7 @@ import re
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
-# 정확한 API 모델 ID는 미확정(추정치) — M2 스파이크에서 확정 후 이 상수만 갱신한다 (D-008).
+# 확정 ID (2026-07-14 스파이크 — openai SDK 2.45.0 타입 정의로 확인, D-008/Research §6).
 DEFAULT_MODEL = "gpt-5.6-terra"
 
 # recipients에 쓰는 브로드캐스트 지정자. 단독으로만 사용한다.
