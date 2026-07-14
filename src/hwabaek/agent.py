@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from hwabaek.contracts import AgentState, ContractError, Message, Usage
+from hwabaek.contracts import (
+    AgentState,
+    ContractError,
+    Message,
+    MessageType,
+    Usage,
+)
 from hwabaek.llm.base import (
     LLMClient,
     LLMError,
@@ -123,10 +129,31 @@ _TRUNCATION_NOTICE = (
 
 
 def merge_batch(messages: list[Message]) -> str:
-    """수신 배치를 발신자 태깅으로 병합해 하나의 user 턴 본문을 만든다 (§2)."""
+    """수신 배치를 발신자 태깅으로 병합해 하나의 user 턴 본문을 만든다 (§2).
+
+    타입별 렌더링: 제안·투표를 일반 채팅과 구별되게 표기한다 — 실 스모크에서
+    제안이 채팅과 동일하게 보여 심의자들이 vote_result 대신 채팅으로만 동의를
+    표하다 전원 기권(no_quorum) 처리된 것에 대한 대응. 제안에는 즉시 투표하라는
+    행동 지시를 함께 싣는다(투표 권한이 없는 수신자를 위해 조건부 문구).
+    """
     parts = []
     for message in messages:
-        parts.append(f"[from: {message.sender}]\n{message.content}")
+        if message.type is MessageType.RESULT_PROPOSAL:
+            parts.append(
+                f"[result proposal from {message.sender}]\n{message.content}\n"
+                "[action required] The session is now VOTING on the proposal "
+                "above. If you have the vote_result tool, cast your vote NOW "
+                "(approve, or reject with a concrete reason). Discussion is "
+                "allowed, but a chat message does NOT count as a vote, and "
+                "unvoted members are treated as abstaining when the voting "
+                "timeout expires."
+            )
+        elif message.type is MessageType.VOTE:
+            decision = message.vote.value if message.vote else "vote"
+            reason = f"\n{message.content}" if message.content else ""
+            parts.append(f"[vote from {message.sender}: {decision}]{reason}")
+        else:
+            parts.append(f"[from: {message.sender}]\n{message.content}")
     return "\n\n".join(parts)
 
 

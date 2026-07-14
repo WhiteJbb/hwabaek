@@ -241,7 +241,22 @@ class SessionManager:
             )
         except ContractError as error:
             raise ToolError(str(error)) from error
-        return f"delivered (message {message.id})"
+        result = f"delivered (message {message.id})"
+        # voting 중 미투표 심의자가 채팅만 보내면 도구 결과로 상기시킨다 —
+        # 실 스모크에서 심의자들이 채팅으로 동의만 표하다 전원 기권된 것에 대한
+        # 런타임 넛지 (pending은 스냅샷 심의자 중 미투표자만 담는다).
+        state = self._consensus.active
+        if (
+            self._session.status is SessionStatus.VOTING
+            and state is not None
+            and sender in state.tally.pending
+        ):
+            result += (
+                "; reminder: you have NOT voted on the active proposal yet - "
+                "call vote_result (approve or reject) before the voting "
+                "timeout, or you will be counted as abstaining"
+            )
+        return result
 
     def submit_result(self, sender: str, content: str) -> str:
         self._guard("submit_result", sender)

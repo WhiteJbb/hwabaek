@@ -243,6 +243,70 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # session_status 이벤트 순서: running -> voting -> completed.
         self.assertEqual(coll.statuses(), ["running", "voting", "completed"])
 
+    async def test_voting_chat_gets_unvoted_reminder(self) -> None:
+        """voting 중 미투표 심의자의 채팅 tool result에 vote_result 리마인더가
+        붙고, 제안 메시지는 채팅과 구별되는 마커+투표 지시로 렌더링된다
+        (실 스모크 대응 — 심의자들이 채팅으로만 동의하다 전원 기권)."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [_submit("the deliverable")]),
+                ("analyst", [
+                    _text(),
+                    _chat("still checking", recipients=["writer"]),
+                    _vote("approve"),
+                ]),
+                ("reviewer", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,  # 채팅+투표 체인이 만료에 선점되지 않게 넉넉히
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        # 제안 렌더링: 마커 + 행동 지시가 analyst의 입력 턴에 존재한다.
+        analyst_inputs = "\n".join(
+            turn.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            if turn.content
+        )
+        self.assertIn("[result proposal from writer]", analyst_inputs)
+        self.assertIn("[action required]", analyst_inputs)
+
+        # voting 중 채팅의 tool result에 미투표 리마인더가 붙는다.
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        self.assertIn("you have NOT voted", tool_outputs)
+
+    async def test_running_chat_has_no_vote_reminder(self) -> None:
+        """running 중(활성 제안 없음) 채팅에는 리마인더가 붙지 않는다."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [
+                    _chat("gathering input", recipients=["analyst"]),
+                    _submit("the deliverable"),
+                ]),
+                ("analyst", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["writer"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        self.assertIn("delivered", tool_outputs)
+        self.assertNotIn("you have NOT voted", tool_outputs)
+
     # -----------------------------------------------------------------------
     # 2) 반려 후 재제출 (version 1 -> 2)
     # -----------------------------------------------------------------------

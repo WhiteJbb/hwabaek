@@ -2,6 +2,30 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b: 실 세션 no_quorum 대응 — 제안/투표 렌더링과 미투표 넛지 (feat/m2b-store)
+
+### 진행한 작업
+- 어댑터 수정 후 사용자 실 세션(3인 팀) 재실행: 인증·스트리밍·협업·제안·초안
+  보존(D-025)까지 전부 정상 동작. 단 **failed(no_quorum)** — 심의자 2명이
+  제안에 "동의합니다" 채팅만 보내고 vote_result를 호출하지 않아 voting_timeout
+  만료 시 전원 기권 처리.
+- 원인: 런타임이 result_proposal을 일반 채팅과 동일하게 렌더링(`[from: x]`
+  태그뿐) — 시스템 프롬프트의 투표 규칙만으로는 모델이 "지금이 투표
+  시점"임을 행동으로 연결하지 못함. 런타임 계층에서 2중 대응:
+  1. **merge_batch 타입별 렌더링** (agent.py): result_proposal은
+     `[result proposal from x]` 마커 + `[action required]` 투표 지시(채팅은
+     투표가 아님·미투표는 기권 명시), vote는 `[vote from x: approve|reject]`
+     + 사유로 렌더링.
+  2. **미투표 넛지** (session.py send_message): voting 중 스냅샷 심의자 중
+     미투표자(tally.pending)가 채팅을 보내면 tool result에 "you have NOT
+     voted ..." 리마인더를 부착.
+- 테스트 6개 추가(총 **444개 통과**, 통합 3회 반복 안정): merge_batch 렌더링
+  4건(신규 tests/test_agent.py) + 통합 2건(voting 중 채팅에 리마인더 부착 /
+  running 중에는 미부착).
+
+### 남은 것
+- 사용자 재실행으로 합의 도달 확인 → M2b 완료(PR).
+
 ## 2026-07-14 — M2b: 실 API 스모크 → 구독 백엔드 실측 대응 + dead 상태 버그 (feat/m2b-store)
 
 ### 진행한 작업
