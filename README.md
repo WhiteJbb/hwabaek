@@ -80,7 +80,8 @@ agents:                  # 1명 이상
 |---|---|---|
 | M0 | 방향 결정, 기술 조사, 문서/계획 수립 | ✅ 완료 |
 | M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
-| M2 | 코어 엔진 (메시지 버스, 에이전트 루프, 종료 정책) | 예정 |
+| M2a | 코어 엔진 (버스/에이전트 루프/합의/종료 정책, 인메모리) | ✅ 완료 |
+| M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | 예정 |
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
@@ -96,6 +97,19 @@ agents:                  # 1명 이상
 - LLM 클라이언트는 프로바이더 중립 계약으로 추상화 — Anthropic 어댑터는 후순위
   ([docs/DecisionLog.md](docs/DecisionLog.md) D-008/D-009)
 - FastAPI + uvicorn, SSE
+
+## 실행 (콘솔 스모크, M2a)
+
+```
+# 밀폐 스모크 — 실키/네트워크 없이 전체 스택 확인
+.venv\Scripts\python.exe -m hwabaek.run "your task" --fake
+
+# 실제 실행 — OPENAI_API_KEY 필요 (기본 팀: configs/team.default.yaml)
+.venv\Scripts\python.exe -m hwabaek.run "your task"
+```
+
+세션 이벤트가 콘솔에 실시간 출력되고, 종료 시 상태·결과(또는 미승인 초안)·토큰
+사용량이 표시됩니다. 웹 대시보드는 M4에서 제공됩니다.
 
 ## 개발 환경 (Windows)
 

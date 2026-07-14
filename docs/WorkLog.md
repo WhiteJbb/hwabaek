@@ -2,6 +2,35 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2a 코어 엔진 구현 (feat/m2a-core)
+
+### 진행한 작업
+- **인터페이스 우선**: bus.py/consensus.py의 시그니처·독스트링(모듈 계약)을 직접
+  확정해 선 커밋 → 병렬 구현의 드리프트 방지.
+- **병렬 위임 (opus ×4)**: MessageBus(테스트 19 — 실패 post의 시퀀스 미소비,
+  원자 drain, wake 동기화), ConsensusEngine(26 — supersede 관측용 last_superseded
+  프로퍼티 추가), OpenAI 어댑터(23 — SDK 타입에서 명시적 캐시 breakpoint 확인·적용,
+  usage 비중첩 분해, 오류 정규화 시 원문 미포함으로 키 유출 차단, 절단된 tool call
+  파싱 크래시 발견·수정), 세션 통합 테스트(13 시나리오 — 실패 경로 전체 + 타이머
+  레이스 + 취소 후 호출 금지 + 종료 후 명령 감사 기록).
+- **조립 계층 직접 구현**: agent.py(도구 3종 스키마, 배치 병합, 이력 절단, 구조화
+  tool error), session.py(SessionManager — 단일 코디네이터 종료 직렬화, 타이머 2종
+  단일 감시, 판정-전환 분리, no_quorum fail_detail 의무, 미승인 초안 보존),
+  run.py(CLI — --fake 밀폐 스모크 / 실 API는 OPENAI_API_KEY).
+- 설계 조정 2건: vote_result 도구의 proposal_id를 생략 가능(활성 제안 해석 —
+  Vote 레코드에는 항상 실제 id)으로 완화, 제안 시점 즉시 판정(first APPROVED /
+  심의자 0명 NO_QUORUM)을 _apply_outcome으로 일원화(리뷰에서 발견한 엣지).
+- CLI --fake 전체 스택 관통 스모크 성공. 전체 테스트 **355개, 3회 반복 통과**.
+
+### 오류/이슈 (수정 완료)
+- (어댑터) 절단된 function_call의 인자 JSON을 즉시 파싱해 크래시 — TOOL_USE 확정
+  후로 파싱을 미뤄 해결 (테스트가 발견).
+- (세션) 심의자 0명 제안이 voting_timeout까지 불필요 대기 — 즉시 no_quorum 처리.
+
+### 남은 것 (M2b)
+- store/sqlite.py 접목, chatgpt_oauth 인증 모드, 도메인 이벤트 taxonomy 확정,
+  **실 API 스모크** (Fake만으로 M2 완료 처리 금지 — 체크리스트 원칙).
+
 ## 2026-07-14 — M2a 착수 전 스파이크: 모델 ID 확정 + subscription 연동 검증
 
 ### 진행한 작업

@@ -80,7 +80,8 @@
    - **투표**: voting 중에는 현재 제안에 대한 `vote_result(approve|reject, reason)`만
      허용. 투표는 `Vote` 레코드(proposal_id 필수, reject는 사유 필수)로 기록되고
      **변경 불가**(D-020), 제출자는 자기 제안에 투표 불가. **이전 제안에 대한 늦은
-     투표는 무시**한다.
+     투표는 무시**한다. 도구 인자에서 proposal_id를 생략하면 활성 제안으로
+     해석한다(LLM의 id 오기입에 견고 — Vote 레코드에는 항상 실제 id가 기록됨).
    - **투표 대상자 (D-018)**: voting 시작 시점의 생존 에이전트(제출자 제외)로
      **스냅샷 확정** — 심의 중 사망해도 집합을 바꾸지 않는다. 투표 불가(사망·오류)는
      voting_timeout 만료 시 기권 처리. 대상자 0명이면 first가 아닌 한 no_quorum
@@ -167,10 +168,12 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 ### M2 — 코어 엔진 (서버 없이 동작)
 
 두 단계로 나눠 진행한다 (D-025 — 통합 리스크 축소):
-- **M2a**: 인메모리 코어 — bus / consensus / session / agent + Fake LLM 통합 테스트
-  + CLI smoke. store 없이 완결 동작이 완료 기준.
-- **M2b**: `store/sqlite.py` 접목(계약은 M1에서 확정됨) + 도메인 이벤트
-  taxonomy 확정(EventContract §8) + 실 API 스모크.
+- **M2a (완료: 2026-07-14)**: 인메모리 코어 — bus / consensus / session / agent +
+  llm/openai_client(api_key 모드) + Fake LLM 통합 테스트(실패 경로 13종) +
+  CLI smoke(`python -m hwabaek.run "..." --fake`). store 없이 완결 동작.
+- **M2b**: `store/sqlite.py` 접목(계약은 M1에서 확정됨) + chatgpt_oauth 인증 모드
+  (D-026) + 도메인 이벤트 taxonomy 확정(EventContract §8) + **실 API 스모크**
+  (Fake 통과만으로 M2 전체를 완료 처리하지 않는다 — 검증 원칙).
 
 - `store/sqlite.py` 구현 (D-017, M2b — 계약은 `store/base.py`에 확정): 스키마는
   계약의 레코드(sessions/팀 스냅샷=agents/messages/proposals/votes/session_events)에
