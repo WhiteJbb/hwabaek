@@ -27,7 +27,12 @@ from hwabaek.contracts import (
     Usage,
 )
 from hwabaek.contracts import AgentCapability
-from hwabaek.llm.base import LLMServerError
+from hwabaek.llm.base import (
+    LLMResponse,
+    LLMServerError,
+    StopReason,
+    ToolCall,
+)
 from hwabaek.llm.fake import text_response, tool_response
 from hwabaek.session import BudgetPhase, SessionManager, ToolError
 
@@ -86,6 +91,23 @@ def _chat(content: str, recipients=("*",)):
 
 def _text(body: str = "thinking"):
     return text_response(body)
+
+
+def _multi_chat(*contents: str, recipients=("*",)) -> LLMResponse:
+    return LLMResponse(
+        text="",
+        tool_calls=tuple(
+            ToolCall(
+                id=f"multi-{index}",
+                name="send_message",
+                arguments={"recipients": list(recipients), "content": content},
+            )
+            for index, content in enumerate(contents)
+        ),
+        stop=StopReason.TOOL_USE,
+        usage=Usage(input_tokens=1, output_tokens=1),
+        model="fake-model",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,23 +500,56 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.result)
 
     # -----------------------------------------------------------------------
-    # 7) 메시지 상한 -> failed(messages)
+    # 7) 일반 채팅 상한 -> proposal 강제 전환 (D-033)
     # -----------------------------------------------------------------------
-    async def test_message_cap_fails_messages(self) -> None:
-        """max_messages를 작게 두고 수다 스크립트로 상한 초과 유도."""
+    async def test_chat_cap_forces_proposal_and_excludes_decision_messages(self) -> None:
+        """채팅 한도 뒤 제안·투표가 추가돼도 messages 실패가 나지 않는다."""
         manager, coll, _ = self._build(
-            [
-                ("chatty", [_chat("m1", ["helper"]), _chat("m2", ["helper"]), _chat("m3", ["helper"])]),
-                ("helper", []),
-            ],
-            max_messages=2,
+            [("writer", []), ("reviewer", [])],
+            max_messages=30,
             idle_timeout=0.5,
             voting_timeout=0.5,
         )
+
+        for index in range(30):
+            sender, recipient = (
+                ("writer", "reviewer")
+                if index % 2 == 0 else ("reviewer", "writer")
+            )
+            manager.send_message(sender, [recipient], f"m{index + 1}")
+        self.assertEqual(manager.budget_phase, BudgetPhase.PROPOSAL)
+        with self.assertRaisesRegex(ToolError, "proposal phase"):
+            manager.send_message("writer", ["reviewer"], "m31")
+
+        manager.submit_result("writer", "decision")
+        manager.vote_result("reviewer", "", "approve", "")
+
+        self.assertEqual(manager.session.status, SessionStatus.COMPLETED)
+        self.assertIsNone(manager.session.fail_reason)
+        self.assertEqual(len(coll.messages(MessageType.CHAT)), 30)
+        self.assertEqual(len(coll.messages(MessageType.RESULT_PROPOSAL)), 1)
+        self.assertEqual(len(coll.messages(MessageType.VOTE)), 1)
+        self.assertEqual(manager._bus.total_posted(), 32)
+
+    async def test_one_response_executes_only_one_send_message(self) -> None:
+        manager, coll, _ = self._build(
+            [
+                (
+                    "writer",
+                    [_multi_chat("first", "second", "third"), _submit("decision")],
+                ),
+                ("reviewer", []),
+            ],
+            mode=ApprovalPolicy.FIRST,
+        )
+
         session = await self._run(manager)
 
-        self.assertEqual(session.status, SessionStatus.FAILED)
-        self.assertEqual(session.fail_reason, FailReason.MESSAGES)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        chats = coll.messages(MessageType.CHAT)
+        self.assertEqual([event.payload["content"] for event in chats], ["first"])
+        details = [event.payload.get("detail") or "" for event in coll.agent_states()]
+        self.assertTrue(any("only one call is allowed" in detail for detail in details))
 
     # -----------------------------------------------------------------------
     # 8) 예산 초과 -> failed(budget)
@@ -613,11 +668,62 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager._call_reservations, {"b": 60})
         await manager._release_agent_call("b")
 
-    async def test_proposer_turn_exhaustion_fails_without_stranded_notice(self) -> None:
+    async def test_next_call_reservation_advances_phase_before_deadline(self) -> None:
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        vote_only = frozenset({AgentCapability.VOTE_RESULT})
+        manager, coll, _ = self._build_with_capabilities(
+            [("writer", [], submit_only), ("reviewer", [], vote_only)],
+            token_budget=100,
+            processed_token_limit=300,
+            synthesis_at=30,
+            proposal_by=50,
+            call_reserve_tokens=10,
+        )
+
+        manager._on_agent_usage("writer", Usage(input_tokens=25))
+        self.assertTrue(await manager._before_agent_call("writer"))
+        self.assertEqual(manager.budget_phase, BudgetPhase.SYNTHESIS)
+        await manager._release_agent_call("writer")
+
+        manager._on_agent_usage("writer", Usage(input_tokens=16))
+        self.assertEqual(manager.session.usage.work_tokens, 41)
+        self.assertTrue(await manager._before_agent_call("writer"))
+        self.assertEqual(manager.budget_phase, BudgetPhase.PROPOSAL)
+        await manager._release_agent_call("writer")
+        phases = [
+            event.payload["phase"] for event in coll.events
+            if event.type is EventType.USAGE
+        ]
+        self.assertIn(BudgetPhase.SYNTHESIS.value, phases)
+        self.assertIn(BudgetPhase.PROPOSAL.value, phases)
+
+    async def test_phase_deadline_waits_for_inflight_reservation(self) -> None:
+        manager, _, _ = self._build(
+            [("a", []), ("b", [])],
+            token_budget=100,
+            processed_token_limit=300,
+            synthesis_at=30,
+            proposal_by=50,
+            call_reserve_tokens=10,
+        )
+        manager._on_agent_usage("a", Usage(input_tokens=35))
+        self.assertEqual(manager.budget_phase, BudgetPhase.SYNTHESIS)
+        self.assertTrue(await manager._before_agent_call("a"))
+
+        waiting = asyncio.create_task(manager._before_agent_call("b"))
+        await asyncio.sleep(0)
+        self.assertFalse(waiting.done())
+
+        await manager._after_agent_call("a", Usage(input_tokens=6))
+        self.assertTrue(await asyncio.wait_for(waiting, TIMEOUT))
+        self.assertEqual(manager.budget_phase, BudgetPhase.PROPOSAL)
+        await manager._release_agent_call("b")
+
+    async def test_turn_limit_preserves_two_bounded_proposal_attempts(self) -> None:
         submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
         vote_only = frozenset({AgentCapability.VOTE_RESULT})
         expensive = text_response("drafting", usage=Usage(input_tokens=55))
-        manager, _, _ = self._build_with_capabilities(
+        manager, _, fakes = self._build_with_capabilities(
             [
                 ("writer", [expensive], submit_only),
                 ("reviewer", [_text()], vote_only),
@@ -634,8 +740,32 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.status, SessionStatus.FAILED)
         self.assertEqual(session.fail_reason, FailReason.BUDGET)
         self.assertEqual(
-            session.fail_detail, "no proposer calls remain for decision phase"
+            session.fail_detail, "proposer did not submit within decision call limit"
         )
+        # 일반 호출 1회 뒤 proposal 교정 호출은 정확히 2회만 추가된다.
+        self.assertEqual(len(fakes["writer"].calls), 3)
+
+    async def test_agents_at_turn_limit_can_submit_and_vote(self) -> None:
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        vote_only = frozenset({AgentCapability.VOTE_RESULT})
+        manager, _, fakes = self._build_with_capabilities(
+            [
+                ("reviewer", [_text("analysis"), _vote("approve")], vote_only),
+                (
+                    "writer",
+                    [_text("drafting"), _submit("decision")],
+                    submit_only,
+                ),
+            ],
+            agent_max_turns=1,
+        )
+
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.result, "decision")
+        self.assertEqual(len(fakes["writer"].calls), 2)
+        self.assertEqual(len(fakes["reviewer"].calls), 2)
 
     async def test_revision_accepts_only_original_proposer(self) -> None:
         manager, _, _ = self._build(

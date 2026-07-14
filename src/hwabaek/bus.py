@@ -11,7 +11,7 @@
   sequence 오름차순으로 반환하고, 그 이후 도착분은 다음 배치로 넘긴다.
   asyncio 단일 이벤트 루프에서 await 없이 완결되어야 원자성이 보장된다.
 - **관측 훅**: 배달된 모든 메시지는 on_message 콜백으로 통지된다 —
-  SessionManager가 message 이벤트 발행·영속화·max_messages 판정에 사용.
+  SessionManager가 message 이벤트 발행·영속화와 chat 상한 판정에 사용.
 - **제어 알림**: 런타임 내부 알림은 메시지와 별도 큐에 두며 message sequence,
   max_messages, on_message 관측에 포함하지 않는다. 메시지와 알림은 같은 깨움
   이벤트를 공유하되, 두 큐가 모두 빌 때만 이벤트를 내린다.
@@ -192,7 +192,7 @@ class MessageBus:
         return len(self._inboxes[agent_name]) + len(self._notices[agent_name])
 
     def total_posted(self) -> int:
-        """세션에서 지금까지 발행된 메시지 총수 — max_messages 판정 재료."""
+        """세션에서 발행된 전체 도메인 메시지 수 — sequence 관측·테스트용."""
         return self._posted
 
     def _require_agent(self, agent_name: str) -> None:

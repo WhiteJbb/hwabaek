@@ -57,7 +57,7 @@ name: default            # 팀 식별자 (소문자/숫자/_/-)
 description: ...         # 선택
 default_model: ...       # 선택 — 생략 시 계약 기본값(GPT-5.6 Terra)
 termination:             # 종료 정책 (전부 선택)
-  max_messages: 30       # 세션 메시지 상한
+  max_messages: 30       # 일반 채팅 상한 — 도달 시 제안 단계 강제
   token_budget: 60000    # 작업 예산(최소 3): input + output + cache_write
   processed_token_limit: 150000 # 전체 처리 상한: 작업 + cache_read
   synthesis_at: 25000    # 종합 유도 시작점
@@ -74,7 +74,7 @@ agents:                  # 1명 이상
     role: ...            # 필수 — 대시보드 표시용
     system_prompt: ...   # 필수
     model: ...           # 선택 — 에이전트별 오버라이드
-    max_turns: 12        # 선택 — 에이전트당 LLM 호출 상한
+    max_turns: 12        # 선택 — 열린 토론 호출 상한(결정 단계는 별도 2회 제한)
     capabilities:        # 선택 — 생략 시 전체. 런타임이 권한 밖 호출을 거부 (D-027)
       - send_message     #   send_message | submit_result | vote_result
       - submit_result

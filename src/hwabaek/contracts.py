@@ -102,7 +102,8 @@ ALL_CAPABILITIES: frozenset[AgentCapability] = frozenset(AgentCapability)
 
 class FailReason(str, enum.Enum):
     BUDGET = "budget"            # 토큰 예산 초과
-    MESSAGES = "messages"        # 메시지 수 상한 초과
+    # D-033 이전 저장 세션 호환. 신규 런타임은 chat 상한에서 proposal로 전환한다.
+    MESSAGES = "messages"
     IDLE = "idle"                # 전원 유휴 — 결과물 없이 종료 (running 상태 전용, D-019)
     AGENT_ERROR = "agent_error"  # 생존 에이전트 부족 (오류로 dead 처리 누적)
     NO_QUORUM = "no_quorum"      # 합의 정족수 미달 (voting timeout 포함)
@@ -331,7 +332,8 @@ class AgentSpec:
     role: str
     system_prompt: str
     model: str | None = None  # None이면 TeamConfig.default_model 사용
-    max_turns: int = 50       # 에이전트당 LLM 호출 상한 (세션 예산과 별개의 방어선)
+    # 열린 토론 호출 상한. 결정 단계는 단계·제안별 2회 제한으로 별도 통제(D-033).
+    max_turns: int = 50
     capabilities: frozenset[AgentCapability] = ALL_CAPABILITIES
 
     def __post_init__(self) -> None:
@@ -401,7 +403,8 @@ class TerminationPolicy:
 
     idle_timeout은 running 상태 전용(전원 유휴 감지)이며, voting 대기 시간은
     approval.voting_timeout이 별도로 관리한다 — voting 중 idle 감시는 세션을
-    failed(idle)로 종료하지 않는다.
+    failed(idle)로 종료하지 않는다. max_messages는 전체 도메인 메시지가 아니라
+    일반 chat 상한이며 도달 시 proposal 단계로 전환한다(D-033).
     """
 
     max_messages: int = 100

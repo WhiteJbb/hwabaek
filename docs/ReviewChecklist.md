@@ -41,6 +41,19 @@
 - [ ] 실 API 대표 기술 안건 10건의 수렴·사용량 기준 측정 (기능 병합 후 실사용 표본으로 튜닝)
 - [x] `feat/m5-budget-control` 브랜치 사용, git 산출물 AI 흔적 없음
 
+## M5.2 검증 기록 (2026-07-14)
+
+- [x] 첫 Standard 실안건의 이벤트·메시지·제안·usage SQLite 기록으로 원인 확정
+- [x] 채팅 30개 뒤 제안·투표 메시지가 추가돼도 완료되는 회귀 테스트
+- [x] 한 응답의 다중 `send_message` 중 1개만 전달되고 나머지는 tool error 처리
+- [x] 단계 임계값 입장 게이트와 진행 중 예약 정산 직렬화 검증
+- [x] 토론 턴 한도 뒤 제출·투표 허용, hard phase 비행동 최대 2회 검증
+- [x] 전체 506개 테스트 3회 반복 통과 (7.759s / 7.754s / 7.852s)
+- [x] Python compileall, JavaScript 구문 검사, `git diff --check` 통과
+- [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 점검과 발견 사항 수정
+- [x] README·Plan·IA·UserScenarios·EventContract·DecisionLog·WorkLog 정합
+- [x] `fix/m5-decision-reserve` 브랜치 사용, git 산출물 AI 흔적 없음
+
 ## 기능/정확성
 
 - [ ] 전체 테스트 통과: `.venv\Scripts\python.exe -m unittest discover -s tests`

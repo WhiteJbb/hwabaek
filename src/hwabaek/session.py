@@ -130,6 +130,7 @@ class SessionManager:
         self._decision_attempts: dict[tuple[BudgetPhase, int, str], int] = {}
         self._decision_unresponsive: set[str] = set()
         self._proposal_count = 0
+        self._chat_messages = 0
         self._revision_proposer: str | None = None
         self._exhausted_agents: set[str] = set()
         self._proposers = frozenset(
@@ -307,7 +308,9 @@ class SessionManager:
         if self._session.status is SessionStatus.VOTING:
             self._set_budget_phase(BudgetPhase.VOTING)
             return
-        if self._budget_phase is BudgetPhase.REVISION:
+        # 입장 게이트나 채팅 상한이 실제 토큰 임계값보다 먼저 proposal로
+        # 전환할 수 있다. 실제 usage만 다시 보며 synthesis로 후퇴시키지 않는다.
+        if self._budget_phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
             return
         work = self._session.usage.work_tokens
         policy = self._team.termination
@@ -345,6 +348,31 @@ class SessionManager:
                     + sum(self._call_reservations.values())
                 )
                 self._sync_budget_phase()
+
+                # 임계값은 "넘은 뒤 전환"이 아니라 다음 호출의 입장 경계다. 경계
+                # 부근에 진행 중 호출이 있으면 먼저 정산해 실제 사용량을 확정하고,
+                # 새 호출 예약 하나가 임계값을 넘길 때는 다음 단계로 선제 전환한다.
+                phase_deadline: int | None = None
+                next_phase: BudgetPhase | None = None
+                if self._budget_phase is BudgetPhase.DISCUSSION:
+                    phase_deadline = policy.effective_synthesis_at
+                    next_phase = BudgetPhase.SYNTHESIS
+                elif self._budget_phase is BudgetPhase.SYNTHESIS:
+                    phase_deadline = policy.effective_proposal_by
+                    next_phase = BudgetPhase.PROPOSAL
+                if (
+                    phase_deadline is not None
+                    and projected + reserve > phase_deadline
+                ):
+                    if self._call_reservations:
+                        await self._budget_condition.wait()
+                        continue
+                    assert next_phase is not None
+                    self._set_budget_phase(next_phase)
+                    if not self._session.is_terminal:
+                        self._emit_usage_snapshot()
+                    continue
+
                 if not self._phase_allows_agent(agent):
                     return False
 
@@ -813,8 +841,53 @@ class SessionManager:
         if self._store is not None:
             self._enqueue_write(lambda: self._store.append_message(message))
         self._emit(make_message_event(self._id_factory(), self._next_seq(), message))
-        if self._bus.total_posted() > self._team.termination.max_messages:
-            self._finalize(SessionStatus.FAILED, fail_reason=FailReason.MESSAGES)
+        if message.type is MessageType.CHAT:
+            self._chat_messages += 1
+            if (
+                self._chat_messages >= self._team.termination.max_messages
+                and self._budget_phase in (
+                    BudgetPhase.DISCUSSION, BudgetPhase.SYNTHESIS
+                )
+                and not self._session.is_terminal
+            ):
+                self._set_budget_phase(BudgetPhase.PROPOSAL)
+                if not self._session.is_terminal:
+                    self._emit_usage_snapshot()
+
+    def _preserve_after_turn_limit(self, agent: str) -> bool:
+        """토론 턴을 다 써도 유한한 결정 단계 자격은 보존한다 (D-033)."""
+        capabilities = self._specs[agent].capabilities
+        preserve = (
+            not self._session.is_terminal
+            and bool(capabilities & {
+                AgentCapability.SUBMIT_RESULT,
+                AgentCapability.VOTE_RESULT,
+            })
+        )
+        # 제출자가 열린 토론 턴을 모두 썼다면 더 기다려도 토큰 임계값이 전진하지
+        # 않을 수 있다. 즉시 proposal로 전환해 보존한 결정 호출을 실제로 사용한다.
+        if (
+            preserve
+            and agent in self._proposers
+            and self._budget_phase in (
+                BudgetPhase.DISCUSSION, BudgetPhase.SYNTHESIS
+            )
+        ):
+            self._set_budget_phase(BudgetPhase.PROPOSAL)
+            if not self._session.is_terminal:
+                self._emit_usage_snapshot()
+        return preserve
+
+    def _allow_call_after_turn_limit(self, agent: str) -> bool:
+        """proposal/voting/revision의 기존 2회 상한 안에서만 추가 호출한다."""
+        return (
+            self._budget_phase in (
+                BudgetPhase.PROPOSAL,
+                BudgetPhase.VOTING,
+                BudgetPhase.REVISION,
+            )
+            and self._phase_allows_agent(agent)
+        )
 
     def _on_agent_state(
         self, agent: str, state: AgentState, detail: str | None = None
@@ -981,3 +1054,9 @@ class _Hooks:
 
     def retry_instruction(self, agent: str) -> str | None:
         return self._m._retry_instruction_for_agent(agent)
+
+    def preserve_after_turn_limit(self, agent: str) -> bool:
+        return self._m._preserve_after_turn_limit(agent)
+
+    def allow_call_after_turn_limit(self, agent: str) -> bool:
+        return self._m._allow_call_after_turn_limit(agent)

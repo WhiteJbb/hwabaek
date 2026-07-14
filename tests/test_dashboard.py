@@ -131,6 +131,8 @@ class DashboardTest(unittest.TestCase):
             "defaultTeamExists",
             "서버 기본 팀을 찾을 수 없습니다.",
             "Quick은 짧고 가역적인 선택",
+            "일반 채팅",
+            "토론 최대",
             "failureExplanation",
         ):
             with self.subTest(token=token):

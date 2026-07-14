@@ -32,7 +32,7 @@ REST 세션 스냅샷 조회(M3)로 제공.
 | 필드 | 타입 | 의미 |
 |---|---|---|
 | `status` | string | `SessionStatus`: `running`\|`voting`\|`completed`\|`failed`\|`cancelled`. |
-| `fail_reason` | string\|null | `status==failed`일 때만 값 존재: `budget`\|`messages`\|`idle`\|`agent_error`\|`no_quorum`\|`interrupted`. |
+| `fail_reason` | string\|null | `status==failed`일 때만 값 존재: `budget`\|`messages`\|`idle`\|`agent_error`\|`no_quorum`\|`interrupted`. `messages`는 D-033 이전 저장 세션 호환 값이며 신규 chat 상한은 proposal 전환에 사용한다. |
 | `fail_detail` | string\|null | `status==failed`일 때만 값 가능 — 귀책(클라이언트 잘못 vs 프로바이더 혼잡) 포함 실패 상세(영어 ASCII). |
 
 ```json
@@ -163,7 +163,8 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | 합의 무효(`no_quorum`) | `vote_status`(최종) + `session_status`(`failed`) | |
 | 에이전트 상태 전이 | `agent_state` | idle 판정은 세션의 단일 감시 태스크. |
 | LLM 호출 종료 후 사용량 갱신 또는 voting/revision 단계 전환 | `usage` | 단계 전환 이벤트는 사용량이 같아도 새 `phase` 스냅샷을 발행한다. |
-| 메시지/토큰/유휴 상한 초과 | `session_status`(`failed`, 해당 `fail_reason`) | |
+| 일반 채팅 상한 도달 | `usage`(`phase=proposal`) | 제안·투표 메시지는 채팅 상한에서 제외하며 이후 일반 채팅은 거부한다(D-033). |
+| 토큰/유휴 상한 초과 | `session_status`(`failed`, 해당 `fail_reason`) | |
 | 생존 에이전트 1개 이하 | `agent_state`(`dead`) + `session_status`(`failed`, `agent_error`) | |
 | 사용자 취소 | `session_status`(`cancelled`) | |
 | 서버 재시작 시 이전 running/voting 세션 | `session_status`(`failed`, `interrupted`) | 재시작 복구 처리(D-021) — 중단 시점 이전에 확정되지 않은 진행 중 세션을 일괄 종료. |
@@ -251,8 +252,9 @@ payload는 `Message.to_dict()`와 동일 스키마.
 
 `proposal.created`/`proposal.rejected`/`proposal.superseded`, `vote.rejected`,
 `message.delivered`/`message.batch_consumed`는 별도 SSE 타입이 아니라 현재 집계 이벤트의
-payload와 저장 레코드로 표현한다. `limit.warning`은 `usage`, 한도 초과 종료는
-`session_status`의 `fail_reason`으로 표현한다.
+payload와 저장 레코드로 표현한다. `limit.warning`은 `usage`, 토큰·유휴 등 종료
+한도 초과는 `session_status`의 `fail_reason`으로 표현한다. chat 상한은
+`usage.phase=proposal` 전환으로 표현한다(D-033).
 
 ### 8.3 호환 원칙
 
