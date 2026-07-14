@@ -25,8 +25,9 @@
    `send_message` 도구로 서로 메시지를 주고받으며 협업합니다.
 3. 협업 과정은 대시보드의 메시지 타임라인에 실시간(SSE)으로 표시됩니다.
 4. 어느 에이전트가 `submit_result`로 초안을 제출하면 다른 에이전트들이 승인/반대를
-   투표합니다(**화백 합의** — 기본 만장일치). 승인되면 최종 결과와 함께 세션이 종료되고,
-   반려되면 사유와 함께 논의가 재개됩니다.
+   투표합니다(**화백 합의** — 기본은 생존 심의자 전원 승인의 엄밀한 만장일치, 미투표는
+   승인으로 치지 않음). 승인되면 최종 결과와 함께 세션이 종료되고, 반려되면 사유와
+   함께 논의가 재개됩니다(재제출은 버전이 오른 새 제안).
 
 ### 종료 안전장치
 
@@ -44,16 +45,46 @@
 - **실시간 관측성**: 세션별 메시지 타임라인, 에이전트 상태, 토큰 사용량/예산 게이지
 - **비용 통제**: 세션 토큰 예산, 프롬프트 캐싱(고정 시스템 프롬프트), 에이전트별 모델 선택
 
+## 팀 설정 (configs/*.yaml)
+
+팀은 YAML 파일 하나로 정의합니다. 전체 스키마와 기본 팀(조사자/분석가/작성자)은
+[configs/team.default.yaml](configs/team.default.yaml) 참조.
+
+```yaml
+name: default            # 팀 식별자 (소문자/숫자/_/-)
+description: ...         # 선택
+default_model: ...       # 선택 — 생략 시 계약 기본값(GPT-5.6 Terra)
+termination:             # 종료 정책 (전부 선택)
+  max_messages: 100      # 세션 메시지 상한
+  token_budget: 200000   # 세션 토큰 예산
+  idle_timeout: 30       # 전원 유휴 판정 시간(초) — running 전용
+  approval:              # 화백 합의 설정 (문자열 축약형 `approval: unanimous`도 지원)
+    mode: unanimous      # unanimous | majority | participating_unanimous | first
+    timeout_seconds: 120 # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
+    minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
+agents:                  # 1명 이상
+  - name: researcher     # 필수
+    role: ...            # 필수 — 대시보드 표시용
+    system_prompt: ...   # 필수
+    model: ...           # 선택 — 에이전트별 오버라이드
+    max_turns: 50        # 선택 — 에이전트당 LLM 호출 상한
+```
+
+허용되지 않은 키는 오타로 간주해 로드 시 즉시 거부됩니다(파일·필드 경로를 포함한
+오류 메시지). 대시보드가 구독하는 이벤트 스트림 계약은
+[docs/EventContract.md](docs/EventContract.md) 참조.
+
 ## 프로젝트 상태
 
 | 마일스톤 | 내용 | 상태 |
 |---|---|---|
 | M0 | 방향 결정, 기술 조사, 문서/계획 수립 | ✅ 완료 |
-| M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | 예정 |
+| M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
 | M2 | 코어 엔진 (메시지 버스, 에이전트 루프, 종료 정책) | 예정 |
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
+| M6 | 확장 실험 (외부 워커, 도구, 도트 월드 UI) | 후순위 |
 
 상세 계획은 [docs/Plan.md](docs/Plan.md) 참조.
 
@@ -69,10 +100,13 @@
 ## 개발 환경 (Windows)
 
 ```
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt   # (M1에서 추가 예정)
+py -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```
+
+- venv는 네이티브 Windows Python(3.11+, `py` 런처)으로 만듭니다 — git-bash의
+  MSYS2 python은 venv 레이아웃이 달라 프로젝트 규칙과 어긋납니다 (DecisionLog D-014).
 
 - `OPENAI_API_KEY` 환경변수 또는 ChatGPT subscription 연동(M2 착수 전 검증 예정).
   API 키는 로그·대시보드에 노출되지 않습니다.
@@ -87,6 +121,7 @@ python -m venv .venv
 | [docs/DecisionLog.md](docs/DecisionLog.md) | 주요 의사결정과 근거 |
 | [docs/Research.md](docs/Research.md) | 기술 조사 (API/패턴 비교) |
 | [docs/IA.md](docs/IA.md) | 대시보드 화면 구조 |
+| [docs/EventContract.md](docs/EventContract.md) | SSE 이벤트 계약 (payload 스키마) |
 | [docs/UserScenarios.md](docs/UserScenarios.md) | 사용자 시나리오 |
 | [docs/Personas.md](docs/Personas.md) | 사용자 페르소나 |
 | [docs/Process.md](docs/Process.md) | 작업 방식/프로세스 |

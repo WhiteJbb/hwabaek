@@ -68,14 +68,19 @@
 - **FastAPI + uvicorn**: asyncio 네이티브 (요청 경로 블로킹 금지 제약과 부합). (D-006)
 - **SSE vs WebSocket**: 대시보드는 서버→클라이언트 단방향 스트림이면 충분 → SSE.
   사용자 입력(제출/취소)은 REST.
-- 세션 영속화: 초기에는 JSONL 파일(세션당 1파일, append) 검토 — write-behind로
-  요청 경로 블로킹 회피. DB 도입은 필요해질 때 (M3에서 확정).
+- 세션 영속화: ~~초기에는 JSONL 파일 검토~~ → **SQLite EventStore로 확정 (D-017)** —
+  의결 기록(제안/투표/결정)의 구조적 조회가 필요. write-behind로 요청 경로 블로킹 회피.
 
 ## 5. 미조사 / 추후 조사
 
 - 에이전트에 부여할 서버 도구(web_search 등) 통합 방식 — 도구 범위 결정(Plan 미결) 후.
 - 세션 이력이 길어질 때의 컨텍스트 관리(compaction 베타) — M5.
 - ChatGPT subscription OAuth 연동의 기술 상세(스코프, rate limit) — M2 스파이크(§6).
+- Python asyncio Queue의 원자적 drain 구현 방식 (`get_nowait` 루프 vs 단일 소비자 보장) — M2 bus.
+- OpenAI tool call의 중단·재시도 처리 (부분 tool call 응답, 타임아웃 후 재호출 시 중복 방지) — M2 어댑터.
+- SSE reconnect와 Last-Event-ID의 실무 동작 (브라우저 EventSource 재전송 규약) — M3.
+- SQLite의 async 접근 방식 비교 (`aiosqlite` vs `asyncio.to_thread` + 표준 `sqlite3`) — M2 store.
+- 프로바이더별 usage 집계 차이 (OpenAI/Anthropic의 캐시 토큰 보고 방식) — M2 어댑터.
 
 ## 6. OpenAI GPT-5.6 / subscription 연동 (2026-07-14 추가 조사)
 

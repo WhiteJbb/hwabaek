@@ -1,0 +1,3 @@
+# Dev install: .venv\Scripts\pip install -r requirements.txt
+# Installs the package itself (with dependencies) in editable mode.
+-e .
