@@ -20,7 +20,9 @@
 | Claude Sonnet 5 | `claude-sonnet-5` | 1M | 3.00 / 15.00 (프로모션 2.00/10.00, ~2026-08-31) |
 | Claude Haiku 4.5 | `claude-haiku-4-5` | 200K | 1.00 / 5.00 |
 
-- 기본 모델은 `claude-opus-4-8` (D-007). 에이전트별 오버라이드 가능하게 설계.
+- ~~기본 모델은 `claude-opus-4-8` (D-007)~~ → D-008에서 GPT-5.6 Terra로 변경(§6).
+  Claude 모델은 에이전트별 오버라이드 옵션으로 유지 — 이 절의 내용은 anthropic 어댑터
+  구현 시(후순위) 필요.
 
 ### thinking / effort (Opus 4.8 기준 — 구버전 지식과 다름, 주의)
 - `thinking: {"type": "adaptive"}` 사용. `budget_tokens`는 **400 에러** (제거됨).
@@ -73,3 +75,36 @@
 
 - 에이전트에 부여할 서버 도구(web_search 등) 통합 방식 — 도구 범위 결정(Plan 미결) 후.
 - 세션 이력이 길어질 때의 컨텍스트 관리(compaction 베타) — M5.
+- ChatGPT subscription OAuth 연동의 기술 상세(스코프, rate limit) — M2 스파이크(§6).
+
+## 6. OpenAI GPT-5.6 / subscription 연동 (2026-07-14 추가 조사)
+
+### GPT-5.6 패밀리 (2026-07-09 출시)
+
+| 티어 | 포지션 | 가격(입력/출력, $/1M) | 비고 |
+|---|---|---|---|
+| Sol | 플래그십 | 5.00 / 30.00 | |
+| Terra | 중간 — GPT-5.5급 성능 | 2.50 / 15.00 | **기본 모델 (D-008)** |
+| Luna | 최속·최저가 | 1.00 / 6.00 | 경량 역할 후보 |
+
+- ChatGPT / Codex / OpenAI API 모두에서 제공.
+- Responses API: Programmatic Tool Calling(모델이 인메모리 프로그램으로 도구들을 조합
+  호출), Multi-agent(베타 — 단일 요청 내 동시 서브에이전트) 추가.
+- 프롬프트 캐싱: 명시적 cache breakpoint 지원, 최소 캐시 수명 30분.
+  GPT-5.6+는 캐시 쓰기 1.25x 과금 / 캐시 읽기 90% 할인 — §2의 Claude 캐싱 전략과
+  마찬가지로 "시스템 프롬프트 고정 + 뒤에만 추가" 원칙 적용 가능.
+- 정확한 API 모델 ID(`gpt-5.6-terra` 추정)는 `확실하지 않음` — openai.com 문서가
+  자동화 접근을 403으로 차단해 미확인. 구현 착수 시 공식 모델 문서에서 확인.
+
+### ChatGPT subscription 연동 (D-008의 전제)
+
+- ChatGPT 구독과 API 키 과금은 **별개 시스템** — 구독으로 일반 API 키 호출은 불가.
+- 단 **"Sign in with ChatGPT"**(OAuth 2.0, BYOS: bring-your-own-subscription) 경로로는
+  사용자가 자기 ChatGPT 계정으로 로그인해 구독 quota로 모델을 사용 가능
+  (Free/Go/Plus/Pro 지원, 개발자 측 무과금)이라는 조사 결과.
+- `확실하지 않음`: 이 OAuth 경로를 우리 같은 자체 로컬 앱에서 쓸 수 있는지, 멀티 에이전트
+  부하(에이전트 수 × 대화 길이)를 quota/rate limit이 감당하는지 → **M2 착수 전 스파이크**.
+- 폴백: 검증 실패 시 `OPENAI_API_KEY` 과금으로 전환하고 D-008 갱신.
+
+출처: openai.com/index/gpt-5-6 (TechCrunch·MarkTechPost 2026-07-09 보도),
+OpenAI Help Center(구독 vs API 과금 분리), openai/codex#10974 (Sign in with ChatGPT).

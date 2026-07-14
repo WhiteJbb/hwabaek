@@ -2,6 +2,29 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 패키지 이름·기본 모델 결정 (M0 후속)
+
+### 진행한 작업
+- 패키지 이름 확정: `hwabaek` (D-010). 후보 약 50개를 PyPI 등록 여부로 스크리닝한 뒤
+  (미등록: hwabaek/thinktank/convene/warroom/moot/dure/watercooler/jamsession 등)
+  사용자 선택으로 확정. Plan/README의 작업명 `agora`(PyPI 등록됨) 교체.
+- 기본 모델 변경: `claude-opus-4-8` → OpenAI **GPT-5.6 Terra** (D-008, D-007 번복).
+  사용자 결정(ChatGPT subscription 연동 전제). 웹 조사로 사실 확인 — GPT-5.6은
+  2026-07-09 출시 3티어(Sol/Terra/Luna), 구독과 API 과금은 분리이나
+  "Sign in with ChatGPT"(BYOS OAuth) 경로 존재. Research.md §6에 기록.
+- LLM 계층 멀티 프로바이더 추상화 결정 (D-009, D-001 일부 수정) — Plan의 M1/M2와
+  디렉터리 구조(`llm/` 서브패키지: base 계약 + openai/anthropic 어댑터) 갱신.
+- 문서 정합화: DecisionLog(D-008~D-010), ProjectContext, Plan, README, Research, Personas.
+
+### 오류/이슈
+- openai.com 공식 문서가 자동화 접근을 403으로 차단 — GPT-5.6의 정확한 API 모델 ID
+  미확인(`gpt-5.6-terra` 추정). Plan 미결 사항으로 등재.
+
+### 다음 할 일
+- M2 착수 전 스파이크: ChatGPT subscription(OAuth) 연동 실현 가능성 검증
+- GPT-5.6 정확한 API 모델 ID 확인
+- M1(계약 확정) 착수: `feat/m1-contracts` 브랜치 — `llm/base.py` LLM 클라이언트 계약 포함
+
 ## 2026-07-14 — 프로젝트 초기화 (M0)
 
 ### 진행한 작업

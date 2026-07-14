@@ -1,8 +1,11 @@
-# team_ai — 멀티 에이전트 오케스트레이션 시스템
+# hwabaek — 멀티 에이전트 오케스트레이션 시스템
 
-여러 Claude 에이전트가 메시지 버스를 통해 **서로 직접 대화하며(자율 협업)** 사용자가 제출한
-범용 태스크를 분담·협업 처리하는 시스템입니다. Claude API(Messages API + tool use) 위에
+여러 LLM 에이전트가 메시지 버스를 통해 **서로 직접 대화하며(자율 협업)** 사용자가 제출한
+범용 태스크를 분담·협업 처리하는 시스템입니다. LLM API(tool use) 위에
 오케스트레이션 계층을 직접 구현합니다.
+
+> 이름의 유래: **화백(和白)** — 중앙 지시자 없이 구성원 간 논의로 결정하던
+> 신라의 합의 회의체. 이 시스템의 자율 협업 패턴과 같은 구조입니다.
 
 ## 어떻게 동작하나
 
@@ -14,7 +17,7 @@
                                        ┌──── 메시지 버스 (asyncio) ────┐
                                        │         │         │          │
                                     Agent A   Agent B   Agent C   (팀 설정으로 정의)
-                                       └── 각자 Claude API 루프 실행 ──┘
+                                       └── 각자 LLM 툴 루프 실행 ────┘
 ```
 
 1. 사용자가 대시보드에서 태스크를 제출하면 **세션**이 생성됩니다.
@@ -55,7 +58,10 @@
 ## 기술 스택
 
 - Python 3.11+ / asyncio
-- [anthropic SDK](https://github.com/anthropics/anthropic-sdk-python) — 기본 모델 `claude-opus-4-8` (에이전트별 오버라이드 가능)
+- [openai SDK](https://github.com/openai/openai-python) — 기본 모델 GPT-5.6 Terra
+  (에이전트별 오버라이드 가능)
+- LLM 클라이언트는 프로바이더 중립 계약으로 추상화 — Anthropic 어댑터는 후순위
+  ([docs/DecisionLog.md](docs/DecisionLog.md) D-008/D-009)
 - FastAPI + uvicorn, SSE
 
 ## 개발 환경 (Windows)
@@ -66,7 +72,8 @@ python -m venv .venv
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
-- `ANTHROPIC_API_KEY` 환경변수 필요. API 키는 로그·대시보드에 노출되지 않습니다.
+- `OPENAI_API_KEY` 환경변수 또는 ChatGPT subscription 연동(M2 착수 전 검증 예정).
+  API 키는 로그·대시보드에 노출되지 않습니다.
 
 ## 문서
 
