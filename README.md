@@ -142,8 +142,10 @@ py -m venv .venv
     있습니다 (Anthropic·Google이 동일 경로를 차단한 전례 있음).
   - 구독 백엔드는 `max_output_tokens`를 거부하므로 토큰 예산은 **사후 집계로만**
     강제됩니다 — 응답 1건이 예산을 초과해 끝날 수 있습니다.
-  - gpt-5.6의 구독 백엔드 지원, 스트리밍(stream)/accept 헤더 강제 여부는 아직
-    실계정으로 검증되지 않았습니다 — 첫 실사용에서 오류가 나면 이슈로 남겨주세요.
+  - 실계정 검증 완료 (2026-07-14): gpt-5.6-terra 구독 백엔드 동작 확인.
+    백엔드가 `store=false`·`stream=true`를 강제하고 명시적 프롬프트 캐시
+    breakpoint를 거부하므로, 어댑터가 내부적으로 스트리밍을 집계하며 이 모드에서는
+    명시적 캐싱을 비활성화합니다 (api_key 모드는 영향 없음).
   - 로그인 시 "Codex용 장치 코드 인증을 활성화" 안내가 나오면: ChatGPT 계정은
     장치 코드 인증이 기본 비활성입니다. chatgpt.com → 설정 → 보안에서 장치 코드
     인증을 켠 뒤 `python -m hwabaek.llm.chatgpt_auth login`을 다시 실행하세요

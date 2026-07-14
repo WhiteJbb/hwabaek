@@ -288,6 +288,30 @@ class ChatGPTOAuthPayloadTest(unittest.TestCase):
         self.assertEqual(payload["instructions"], "You are a test agent.")
         self.assertIn("input", payload)
 
+    def test_oauth_mode_forces_store_false_and_stream_true(self) -> None:
+        # 구독 백엔드 강제 사항(2026-07-14 실측 — 400 응답으로 확인).
+        payload = build_request_payload(self._req(), auth_mode="chatgpt_oauth")
+        self.assertIs(payload["store"], False)
+        self.assertIs(payload["stream"], True)
+
+    def test_api_key_mode_has_no_store_or_stream(self) -> None:
+        payload = build_request_payload(self._req())
+        self.assertNotIn("store", payload)
+        self.assertNotIn("stream", payload)
+
+    def test_oauth_mode_places_no_cache_breakpoint(self) -> None:
+        # 구독 백엔드는 prompt_cache_breakpoint를 거부한다(실측 400) —
+        # cache_system_prefix=True여도 input 블록에 breakpoint를 배치하지 않는다.
+        payload = build_request_payload(
+            self._req(cache_system_prefix=True), auth_mode="chatgpt_oauth"
+        )
+        self.assertNotIn("prompt_cache_options", payload)
+        for item in payload["input"]:
+            content = item.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    self.assertNotIn("prompt_cache_breakpoint", block)
+
     def test_oauth_mode_keeps_tools(self) -> None:
         schema = {"type": "object", "properties": {}}
         payload = build_request_payload(

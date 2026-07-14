@@ -2,6 +2,44 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b: 실 API 스모크 → 구독 백엔드 실측 대응 + dead 상태 버그 (feat/m2b-store)
+
+### 진행한 작업
+- 사용자 실계정 스모크(3인 팀, chatgpt_oauth)에서 전 에이전트 client_error 사망 →
+  원인 진단을 위해 스크래치 스크립트로 구독 백엔드에 변형 요청을 직접 보내 400
+  본문을 실측. **구독 백엔드 강제 사항 3건 확정** (Research §6 실측 결과에 기록):
+  1. `store=false` 필수, 2. `stream=true` 필수(비스트리밍 400),
+  3. `prompt_cache_breakpoint` 거부("not supported on this model").
+- 어댑터 대응 (openai_client.py):
+  - chatgpt_oauth payload에 `store=False`/`stream=True` 강제, 명시적 캐시
+    breakpoint 미배치(이 모드에서 캐싱 opt-in 오프).
+  - `_stream_final_response` 신설 — SSE 이벤트를 집계해 완성 응답으로 복원.
+    실측상 종결 스냅샷(response.completed)의 output이 **비어 있어**,
+    `response.output_item.done`의 완성 아이템(message/function_call)을 수집해
+    `_ResponseView`로 보강(스냅샷 비변형, usage는 스냅샷 것 사용).
+  - response.failed는 LLMServerError로 정규화(error.message 미포함 — 마스킹).
+- 실계정 재검증: 텍스트 응답("안녕하세요!") + tool call(submit_result 인자 복원)
+  모두 어댑터 경로로 성공. **gpt-5.6-terra 구독 백엔드 지원 실측 확정.**
+- 테스트 12개 추가(총 **438개 통과**): payload store/stream/breakpoint 단언,
+  스트리밍 집계(완성/보강/스냅샷 우선/incomplete/failed/무종결), api_key 모드
+  비스트리밍 유지, 전원 사망 회귀(아래).
+
+### 오류/이슈 (수정 완료)
+- (agent/session) **dead 상태 덮어쓰기로 실패 사유 오분류**: 실 스모크에서 전원
+  사망인데 failed(agent_error)가 아닌 failed(idle)로 종료. 원인 — AgentLoop가
+  fatal 후에도 루프를 계속 돌며 IDLE을 보고해 `_agent_states`의 DEAD가 IDLE로
+  덮어써지고 생존자 수가 부풀어 agent_error 판정이 누락. 수정 2중:
+  ① AgentLoop `_dead` 플래그로 fatal 후 루프 완전 종료(인박스 소비도 중단),
+  ② SessionManager `_on_agent_state`에서 DEAD를 종결 상태로 보호(덮어쓰기 무시).
+  회귀 테스트를 수정 전 코드에 돌려 동일 오분류(IDLE≠AGENT_ERROR) 재현 확인.
+- (어댑터) 스트림 집계 1차 구현이 종결 스냅샷만 신뢰해 **text가 빈 문자열** —
+  구독 백엔드는 스냅샷에 output을 싣지 않는 것을 실측으로 확인, done 아이템
+  보강으로 해결.
+
+### 남은 것
+- 사용자 재실행으로 3인 팀 전체 세션 E2E 확인 → 통과 시 M2b 완료(PR).
+- device flow rate limit 미계측(실사용 중 관찰), 구독 백엔드 암묵 캐싱 여부 미확인.
+
 ## 2026-07-14 — M2b: chatgpt_oauth CLI 연결 마무리 (feat/m2b-store)
 
 ### 진행한 작업

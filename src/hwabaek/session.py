@@ -453,6 +453,14 @@ class SessionManager:
     ) -> None:
         if self._session.is_terminal:
             return
+        # DEAD는 에이전트의 종결 상태 — 이후 보고(IDLE 등)가 덮어쓰지 못하게 한다.
+        # 덮어쓰면 생존자 수가 부풀어 agent_error 판정이 누락된다 (이중 방어;
+        # 1차 방어는 AgentLoop가 fatal 후 루프를 끝내는 것).
+        if (
+            self._agent_states.get(agent) is AgentState.DEAD
+            and state is not AgentState.DEAD
+        ):
+            return
         if self._agent_states.get(agent) is state and detail is None:
             return
         self._agent_states[agent] = state

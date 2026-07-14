@@ -75,8 +75,9 @@
 
 - 에이전트에 부여할 서버 도구(web_search 등) 통합 방식 — 도구 범위 결정(Plan 미결) 후.
 - 세션 이력이 길어질 때의 컨텍스트 관리(compaction 베타) — M5.
-- ~~ChatGPT subscription OAuth 연동의 기술 상세~~ → 스파이크 완료(§6). 잔여:
-  gpt-5.6의 구독 백엔드 지원 실측 + device flow rate limit — M2b 접목 시.
+- ~~ChatGPT subscription OAuth 연동의 기술 상세~~ → 스파이크 완료(§6),
+  **구독 백엔드 실측 완료 (2026-07-14 — §6 실측 결과)**. 잔여: device flow
+  rate limit(미계측 — 실사용 중 관찰).
 - Python asyncio Queue의 원자적 drain 구현 방식 (`get_nowait` 루프 vs 단일 소비자 보장) — M2 bus.
 - OpenAI tool call의 중단·재시도 처리 (부분 tool call 응답, 타임아웃 후 재호출 시 중복 방지) — M2 어댑터.
 - SSE reconnect와 Last-Event-ID의 실무 동작 (브라우저 EventSource 재전송 규약) — M3.
@@ -121,6 +122,18 @@
     litellm 문서는 gpt-5.4까지 기재 — 5.6의 구독 백엔드 지원은 실측 필요.
   - **결정 (D-026)**: 하이브리드 — 어댑터 인증 모드 2종(api_key | chatgpt_oauth).
     M2a는 api_key(공식·안정), M2b에서 chatgpt_oauth 모드 추가.
+- **구독 백엔드 실측 결과 (2026-07-14, 실계정 — 어댑터 접목 시 전부 반영)**:
+  - `gpt-5.6-terra` 구독 백엔드 **지원 확인** (텍스트·tool call 모두 정상, usage 보고).
+  - 사전 로그인 필요: ChatGPT 보안 설정에서 **장치 코드 인증 활성화**가 선행돼야
+    device flow가 진행된다(기본 비활성 — 서버가 활성화 안내를 반환).
+  - `store=false` **강제** (400 "Store must be set to false").
+  - `stream=true` **강제** (400 "Stream must be set to true") → 어댑터가 SSE 이벤트를
+    집계해 완성 응답으로 되돌린다. accept 헤더는 별도 강제 없음(httpx 기본으로 동작).
+  - `prompt_cache_breakpoint` **거부** (400 "not supported on this model") →
+    chatgpt_oauth 모드에서는 명시적 캐싱 opt-in을 끈다(암묵 캐싱 여부는 미확인).
+  - 종결 이벤트(response.completed)의 Response 스냅샷에 **output이 비어 있음**
+    (usage는 정상) → `response.output_item.done` 이벤트의 완성 아이템
+    (message/function_call)을 수집해 보강해야 한다. 표준 API와 다른 지점.
 
 출처: openai.com/index/gpt-5-6 (TechCrunch·MarkTechPost 2026-07-09 보도),
 OpenAI Help Center(구독 vs API 과금 분리), openai/codex#10974 (Sign in with ChatGPT),

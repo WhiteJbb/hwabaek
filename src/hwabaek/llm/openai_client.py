@@ -99,25 +99,33 @@ def build_request_payload(
     - tools -> function 도구 정의
     - cache_system_prefix -> prompt_cache_options + 접두사 끝 명시적 breakpoint
 
-    auth_mode가 chatgpt_oauth면 구독 백엔드가 거부하는 top-level 필드
-    (max_output_tokens, prompt_cache_options 등)를 화이트리스트로 제거한다 — 나머지
-    매핑은 api_key 모드와 동일하다(순수 함수, 네트워크·시계 없음).
+    auth_mode가 chatgpt_oauth면 구독 백엔드에 맞게 조정한다 (2026-07-14 실측):
+    - 화이트리스트 외 top-level 필드(max_output_tokens 등) 제거 — 미제거 시 400.
+    - `store=False`·`stream=True` 강제 — 미설정 시 각각 400 "Store must be set
+      to false" / "Stream must be set to true".
+    - 명시적 캐시 breakpoint 미배치 — 400 "prompt_cache_breakpoint is not
+      supported on this model" (캐싱 opt-in 자체를 끈다).
+    나머지 매핑은 api_key 모드와 동일하다(순수 함수, 네트워크·시계 없음).
     """
+    chatgpt = auth_mode == AUTH_CHATGPT_OAUTH
+    cache_prefix = request.cache_system_prefix and not chatgpt
     payload: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system_prompt,
         "max_output_tokens": request.max_output_tokens,
-        "input": _build_input(request.turns, cache_prefix=request.cache_system_prefix),
+        "input": _build_input(request.turns, cache_prefix=cache_prefix),
     }
     if request.tools:
         payload["tools"] = [_tool_param(tool) for tool in request.tools]
-    if request.cache_system_prefix:
+    if cache_prefix:
         # 캐싱을 명시적으로 opt-in한다(30분 최소 수명). 명시적 breakpoint는 접두사
         # 끝(첫 텍스트 블록)에 함께 부여했다 — _build_input 참조.
         payload["prompt_cache_options"] = {"ttl": _CACHE_TTL}
-    if auth_mode == AUTH_CHATGPT_OAUTH:
-        # 구독 백엔드는 화이트리스트 외 필드를 거부한다(litellm 확정) — 제거한다.
+    if chatgpt:
         payload = {k: v for k, v in payload.items() if k in _CHATGPT_ALLOWED_KEYS}
+        # complete()가 stream 플래그를 보고 이벤트를 집계해 완성 응답으로 되돌린다.
+        payload["store"] = False
+        payload["stream"] = True
     return payload
 
 
@@ -397,16 +405,35 @@ def _summary(label: str, exc: BaseException) -> str:
 # 클라이언트
 # ---------------------------------------------------------------------------
 
+class _ResponseView:
+    """Response 스냅샷의 읽기 뷰 — 일부 속성만 재정의한다(SDK 모델 비변형).
+
+    구독 백엔드의 종결 스냅샷처럼 output이 비어 있는 응답을, 스트림에서 수집한
+    완성 아이템으로 보강할 때 쓴다. parse_response는 getattr만 사용하므로
+    output 외 속성(status/usage/model/incomplete_details)은 원본에 위임된다.
+    """
+
+    def __init__(self, base: Any, **overrides: Any) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
 class OpenAIClient:
     """OpenAI Responses API 기반 LLMClient 구현 — 인증 모드 2종(D-026).
 
-    - api_key(기본·공식): OPENAI_API_KEY 또는 주입 키로 표준 API 호출.
+    - api_key(기본·공식): OPENAI_API_KEY 또는 주입 키로 표준 API 호출(비스트리밍).
     - chatgpt_oauth(선택·비공식): ChatGPT 구독 device flow 토큰으로 구독 백엔드 호출.
       구독 백엔드가 거부하는 필드는 payload에서 제거하고(build_request_payload),
-      토큰 예산은 사후 집계로만 강제한다.
+      토큰 예산은 사후 집계로만 강제한다. 백엔드가 스트리밍을 강제하므로(실측)
+      내부적으로 SSE 이벤트를 집계해 완성 응답 1건으로 되돌린다 — LLMClient
+      계약(완성 응답 반환)은 두 모드에서 동일하다.
 
     재시도는 SDK 기본(max_retries=2)에 맡기고 자체 재시도 루프는 두지 않는다.
-    스트리밍은 쓰지 않고 완성된 응답 1건을 반환한다(계약 준수).
     """
 
     def __init__(
@@ -475,13 +502,62 @@ class OpenAIClient:
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """요청 1건을 수행하고 정규화된 응답을 반환한다.
 
-        payload 빌드 -> responses.create -> parse. SDK 예외는 map_error로 변환해
-        raise하며, 원본 예외를 체이닝하지 않는다(`from None`) — 원본 메시지에 섞일 수
-        있는 API 키가 트레이스백에 노출되지 않게 한다.
+        payload 빌드 -> responses.create -> parse. payload에 stream이 켜져 있으면
+        (chatgpt_oauth — 백엔드 강제) 이벤트 스트림을 집계해 최종 응답으로 되돌린다.
+        SDK 예외는 map_error로 변환해 raise하며, 원본 예외를 체이닝하지 않는다
+        (`from None`) — 원본 메시지에 섞일 수 있는 API 키가 트레이스백에 노출되지
+        않게 한다.
         """
         payload = build_request_payload(request, auth_mode=self._auth_mode)
         try:
-            raw = await self._client.responses.create(**payload)
+            if payload.get("stream"):
+                raw = await self._stream_final_response(payload)
+            else:
+                raw = await self._client.responses.create(**payload)
         except openai.OpenAIError as exc:
             raise map_error(exc) from None
         return parse_response(raw)
+
+    async def _stream_final_response(self, payload: dict[str, Any]) -> Any:
+        """이벤트 스트림을 소비해 최종 Response 객체를 반환한다.
+
+        종결 이벤트(response.completed / response.incomplete / response.failed)의
+        Response 스냅샷(usage 포함)을 parse_response에 넘긴다(비스트리밍 경로와 매핑
+        단일화). 단, 구독 백엔드는 종결 스냅샷에 output을 싣지 않으므로(2026-07-14
+        실측 — output 빈 배열) response.output_item.done 이벤트의 완성 아이템
+        (message/function_call)을 모아 보강한다. 텍스트 델타는 조립하지 않는다 —
+        done 아이템에 전체 텍스트가 실린다. incomplete는 parse_response가
+        MAX_TOKENS로 정규화한다.
+        """
+        final: Any = None
+        done_items: list[Any] = []
+        stream = await self._client.responses.create(**payload)
+        async with stream:
+            async for event in stream:
+                etype = getattr(event, "type", "")
+                if etype == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is not None:
+                        done_items.append(item)
+                elif etype in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    final = getattr(event, "response", None)
+                    break
+        if final is None:
+            raise LLMServerError(
+                "OpenAI stream ended without a terminal response event"
+            )
+        if getattr(final, "status", None) == "failed":
+            # 실패 응답의 error.message는 싣지 않는다(마스킹 원칙) — code만 요약.
+            error = getattr(final, "error", None)
+            code = getattr(error, "code", None) if error is not None else None
+            raise LLMServerError(
+                f"OpenAI response failed; code={code or 'unknown'}"
+            )
+        if not (getattr(final, "output", None) or ()) and done_items:
+            # 스냅샷을 변형하지 않고 parse_response가 읽는 속성만 가진 뷰로 보강한다.
+            return _ResponseView(final, output=done_items)
+        return final

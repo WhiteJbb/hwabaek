@@ -415,6 +415,35 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(dead)
         self.assertIn("provider_error", dead[0].payload["detail"])
 
+    async def test_all_agents_dying_fails_agent_error_not_idle(self) -> None:
+        """3인 전원 사망 -> failed(agent_error), failed(idle) 아님 (회귀 — 실 스모크).
+
+        사망한 에이전트의 루프가 계속 돌며 IDLE을 보고하면 DEAD가 덮어써져 생존자
+        수가 부풀고, agent_error 판정이 누락된 채 idle 타임아웃으로 오분류된다."""
+        manager, coll, _ = self._build(
+            [
+                ("a", [LLMServerError("upstream 500")]),
+                ("b", [LLMServerError("upstream 500")]),
+                ("c", [LLMServerError("upstream 500")]),
+            ],
+            idle_timeout=0.2,  # 오분류 시 idle이 빠르게 발동하게 짧게 둔다
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.AGENT_ERROR)
+        # dead 확정 후 같은 에이전트의 idle 상태 이벤트는 발행되지 않는다.
+        seen_dead: set[str] = set()
+        for e in coll.agent_states():
+            agent, state = e.payload["agent"], e.payload["state"]
+            if state == "dead":
+                seen_dead.add(agent)
+            elif agent in seen_dead:
+                self.assertNotEqual(
+                    state, "idle", f"{agent} reported idle after dead"
+                )
+
     # -----------------------------------------------------------------------
     # 10) 취소 -> cancelled (취소 후 추가 API 호출 없음)
     # -----------------------------------------------------------------------

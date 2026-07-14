@@ -182,6 +182,7 @@ class AgentLoop:
         self._history_limit = history_limit
         self._turns: list[Turn] = []
         self._calls_made = 0
+        self._dead = False
 
     async def run(self) -> None:
         """루프 본체. 세션 종료 시 SessionManager가 태스크를 취소한다."""
@@ -196,7 +197,9 @@ class AgentLoop:
         self._turns.append(first)
         await self._think_and_act()
 
-        while self._calls_made < self._max_turns:
+        # dead면 즉시 종료 — 루프를 계속 돌면 IDLE 보고가 DEAD 상태를 덮어써
+        # 생존자 계산이 틀어진다 (failed(agent_error)가 failed(idle)로 오분류).
+        while not self._dead and self._calls_made < self._max_turns:
             self._hooks.on_state(self.name, AgentState.IDLE)
             await self._bus.wait_for_messages(self.name)
             batch = self._bus.drain(self.name)
@@ -205,9 +208,10 @@ class AgentLoop:
             self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
             await self._think_and_act()
 
-        self._hooks.on_state(
-            self.name, AgentState.IDLE, detail="max_turns exhausted"
-        )
+        if not self._dead:
+            self._hooks.on_state(
+                self.name, AgentState.IDLE, detail="max_turns exhausted"
+            )
 
     async def _think_and_act(self) -> None:
         """LLM 호출 1회 + 후속 tool_use 체인 처리 (체인도 호출 수에 포함)."""
@@ -224,7 +228,9 @@ class AgentLoop:
             try:
                 response = await self._llm.complete(request)
             except LLMError as error:
-                # SDK 자체 재시도가 소진된 뒤 도달한다 — 세션에 귀책과 함께 보고.
+                # SDK 자체 재시도가 소진된 뒤 도달한다 — 세션에 귀책과 함께 보고하고
+                # 루프를 완전히 끝낸다(dead 에이전트는 인박스 소비도 중단).
+                self._dead = True
                 self._hooks.on_fatal_error(self.name, error)
                 return
             self._calls_made += 1
