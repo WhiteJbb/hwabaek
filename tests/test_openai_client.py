@@ -516,6 +516,170 @@ class OpenAIClientCompleteTest(unittest.IsolatedAsyncioTestCase):
             await client.complete(_sample_request())
 
 
+# ---------------------------------------------------------------------------
+# OpenAIClient.complete() — chatgpt_oauth 스트리밍 집계 (구독 백엔드가 stream 강제)
+# ---------------------------------------------------------------------------
+
+class _FakeStream:
+    """responses.create(stream=True)가 돌려주는 AsyncStream의 최소 대역."""
+
+    def __init__(self, events: list) -> None:
+        self._events = list(events)
+        self.closed = False
+
+    async def __aenter__(self) -> "_FakeStream":
+        return self
+
+    async def __aexit__(self, *exc_info) -> bool:
+        self.closed = True
+        return False
+
+    def __aiter__(self) -> "_FakeStream":
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        return self._events.pop(0)
+
+
+class _StubTokenProvider:
+    def get_auth(self) -> tuple[str, str | None]:
+        return "fake-access-token", "acct_1"
+
+
+def _oauth_client_with_stream(stream: _FakeStream) -> tuple[OpenAIClient, AsyncMock]:
+    client = OpenAIClient(
+        auth_mode="chatgpt_oauth", token_provider=_StubTokenProvider()
+    )
+    create = AsyncMock(return_value=stream)
+    client._client = SimpleNamespace(responses=SimpleNamespace(create=create))
+    return client, create
+
+
+def _stream_event(etype: str, response=None, item=None) -> SimpleNamespace:
+    return SimpleNamespace(type=etype, response=response, item=item)
+
+
+class OpenAIClientStreamingCompleteTest(unittest.IsolatedAsyncioTestCase):
+    async def test_oauth_complete_aggregates_completed_event(self) -> None:
+        """chatgpt_oauth는 stream=True/store=False로 호출하고, 종결 이벤트의
+        Response 스냅샷(usage 포함)을 완성 응답으로 되돌린다."""
+        final = _response(
+            [_text_message("done")], usage=_usage(input_tokens=12, output_tokens=3)
+        )
+        stream = _FakeStream([
+            _stream_event("response.created"),
+            _stream_event("response.in_progress"),
+            _stream_event("response.completed", final),
+        ])
+        client, create = _oauth_client_with_stream(stream)
+
+        resp = await client.complete(_sample_request())
+
+        self.assertEqual(resp.text, "done")
+        self.assertEqual(resp.stop, StopReason.END)
+        self.assertEqual(resp.usage.output_tokens, 3)
+        kwargs = create.await_args.kwargs
+        self.assertIs(kwargs["stream"], True)
+        self.assertIs(kwargs["store"], False)
+        self.assertNotIn("max_output_tokens", kwargs)
+        self.assertTrue(stream.closed)  # 종결 이벤트 후 스트림을 닫는다
+
+    async def test_oauth_complete_backfills_empty_snapshot_from_done_items(self) -> None:
+        """구독 백엔드는 종결 스냅샷에 output을 싣지 않는다(실측) —
+        response.output_item.done의 완성 아이템으로 텍스트를 복원한다."""
+        empty_final = _response(
+            [], usage=_usage(input_tokens=28, output_tokens=7)
+        )
+        stream = _FakeStream([
+            _stream_event("response.created"),
+            _stream_event(
+                "response.output_item.done", item=_text_message("annyeong!")
+            ),
+            _stream_event("response.completed", empty_final),
+        ])
+        client, _ = _oauth_client_with_stream(stream)
+
+        resp = await client.complete(_sample_request())
+
+        self.assertEqual(resp.text, "annyeong!")
+        self.assertEqual(resp.stop, StopReason.END)
+        # usage는 종결 스냅샷의 것을 그대로 쓴다.
+        self.assertEqual(resp.usage.output_tokens, 7)
+
+    async def test_oauth_complete_backfills_tool_calls_from_done_items(self) -> None:
+        empty_final = _response([], usage=_usage(input_tokens=5, output_tokens=5))
+        stream = _FakeStream([
+            _stream_event(
+                "response.output_item.done",
+                item=_function_call("send_message", '{"recipients": ["*"]}'),
+            ),
+            _stream_event("response.completed", empty_final),
+        ])
+        client, _ = _oauth_client_with_stream(stream)
+
+        resp = await client.complete(_sample_request())
+
+        self.assertEqual(resp.stop, StopReason.TOOL_USE)
+        self.assertEqual(resp.tool_calls[0].name, "send_message")
+        self.assertEqual(resp.tool_calls[0].arguments, {"recipients": ["*"]})
+
+    async def test_oauth_complete_prefers_snapshot_output_when_present(self) -> None:
+        # 스냅샷에 output이 있으면(표준 API 동작) done 아이템 보강 없이 그대로 쓴다.
+        final = _response([_text_message("from snapshot")])
+        stream = _FakeStream([
+            _stream_event(
+                "response.output_item.done", item=_text_message("from delta")
+            ),
+            _stream_event("response.completed", final),
+        ])
+        client, _ = _oauth_client_with_stream(stream)
+
+        resp = await client.complete(_sample_request())
+        self.assertEqual(resp.text, "from snapshot")
+
+    async def test_oauth_complete_incomplete_maps_to_max_tokens(self) -> None:
+        final = _response(
+            [_text_message("partial")],
+            status="incomplete",
+            incomplete_details=IncompleteDetails(reason="max_output_tokens"),
+        )
+        stream = _FakeStream([_stream_event("response.incomplete", final)])
+        client, _ = _oauth_client_with_stream(stream)
+
+        resp = await client.complete(_sample_request())
+        self.assertEqual(resp.stop, StopReason.MAX_TOKENS)
+
+    async def test_oauth_complete_failed_raises_server_error(self) -> None:
+        """response.failed는 LLMServerError — error.message(본문)는 싣지 않는다."""
+        final = _response([], status="failed")
+        final.error = SimpleNamespace(code="server_error", message=SECRET_KEY)
+        stream = _FakeStream([_stream_event("response.failed", final)])
+        client, _ = _oauth_client_with_stream(stream)
+
+        with self.assertRaises(LLMServerError) as ctx:
+            await client.complete(_sample_request())
+        self.assertIn("server_error", str(ctx.exception))
+        self.assertNotIn(SECRET_KEY, str(ctx.exception))
+
+    async def test_oauth_complete_without_terminal_event_raises(self) -> None:
+        stream = _FakeStream([_stream_event("response.created")])
+        client, _ = _oauth_client_with_stream(stream)
+        with self.assertRaises(LLMServerError):
+            await client.complete(_sample_request())
+
+    async def test_api_key_mode_stays_non_streaming(self) -> None:
+        raw = _response([_text_message("ok")])
+        create = AsyncMock(return_value=raw)
+        client = _client_with_mock(create)
+
+        await client.complete(_sample_request())
+        kwargs = create.await_args.kwargs
+        self.assertNotIn("stream", kwargs)
+        self.assertNotIn("store", kwargs)
+
+
 class OpenAIClientConstructionTest(unittest.TestCase):
     def test_satisfies_llm_client_protocol(self) -> None:
         client = OpenAIClient(api_key="test-key")

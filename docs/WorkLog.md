@@ -2,6 +2,148 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M2b 완료: 실 세션 합의 성공 (feat/m2b-store)
+
+### 진행한 작업
+- D-030(participating_unanimous·max_turns 25) + 관측성/렌더링 보강 반영 후
+  4차 실 세션(chatgpt_oauth, 3인 팀) **completed** — 제안 v1에 2/2 approve,
+  최종 결과 정상 수령. M2b 완료 기준(실 API 스모크) 충족.
+- 세션 타이밍 분석(DB 실증): 총 223초 = 토론 207초 + **투표 15.8초**.
+  LLM 호출 28회, 호출 간격 중앙값 2.4초·최대 **150.2초** — 구독 백엔드가
+  간헐적으로 호출 1건을 2~3분 지연시키는 것이 체감 지연의 원인(critic·research
+  각 1회씩 ~150초대 호출 관측). 우리 쪽 대기 로직 아님. read 타임아웃(180s)
+  직전까지 가는 수준 — 지연이 더 심해지면 타임아웃 조정 또는
+  reasoning effort 하향(payload `reasoning`은 구독 화이트리스트에 포함) 검토.
+- 문서 정합: README 마일스톤 표 M2b 완료 표기, Plan.md M2b 완료 처리.
+
+### 남은 것
+- M2b PR 생성 → squash merge. 다음 마일스톤 M3(FastAPI 서버).
+- 관찰 항목: 구독 백엔드 간헐 지연(150s+), device flow rate limit.
+
+## 2026-07-14 — M2b: 실 세션 3차 분석(DB 실증) — 관측성·타임아웃·투표 UX 보강 (feat/m2b-store)
+
+### 진행한 작업
+- 렌더링/넛지 반영 후 3차 실 세션도 no_quorum. 저장된 세션 DB(events)를 직접
+  조회해 타임라인 실증:
+  - **critic**: voting 시작(10:52:45) 후 25초 만에 max_turns 15회 소진
+    (10:53:10 "max_turns exhausted") — 그 뒤로는 투표가 물리적으로 불가능한
+    상태에서 voting_timeout(120s)까지 대기 후 기권 처리.
+  - **research**: 첫 LLM 호출(10:52:17)이 세션 종료(10:54:47, 150초)까지
+    미완료 — 스트림 무응답으로 세션 내내 THINKING에 갇힘.
+  - 코드 버전 검증: 04bcbcb 커밋(19:50:59 KST) < 세션 시작(19:52:17 KST) —
+    렌더링/넛지가 적용된 상태에서 발생.
+- 보강 4건:
+  1. **도구 오류 관측성** (agent.py): ToolError를 모델에게만 돌려주고 이벤트
+     무흔적이던 것을 agent_state detail(`tool error [vote_result]: ...`)로
+     노출 — 심의자의 투표 실패 여부를 다음 실 세션부터 로그·DB로 확인 가능.
+  2. **투표 교정 응답** (session.py): 잘못된/지어낸 proposal_id 투표에
+     "vote ignored" 대신 활성 제안 id·버전·제출자와 재시도 방법을 안내.
+  3. **스트림 타임아웃** (openai_client.py): 구독 클라이언트에 명시적
+     httpx.Timeout(connect 15/read 180/write 30) — 청크 간격이 read를 넘으면
+     LLMTimeoutError로 정규화되어 dead 처리, 무한 THINKING 방지.
+  4. **CLI 타임스탬프** (run.py): 이벤트 라인에 HH:MM:SS 표시(타이머 디버깅).
+  merge_batch 제안 렌더링에 proposal_id 명시, 미투표 리마인더에 활성 제안
+  id·버전 포함.
+- 테스트 3개 추가(총 **447개 통과**, 핵심 모듈 3회 반복 안정).
+
+### 남은 것 / 사용자 결정 필요
+- critic이 채팅으로 턴을 소진해 투표 불능이 되는 문제의 구조적 대응:
+  max_turns 상향(15→20+) 여부, voting 중 심의자 채팅 정책(D-024) 재검토 여부.
+- unanimous 모드에서 심의자 1명이 hang/dead이면 no_quorum이 보장되는 문제:
+  기본 팀을 participating_unanimous(+minimum_votes)로 바꿀지 여부.
+- 다음 실 세션에서 tool error detail 관측으로 critic의 투표 실패 원인 확정.
+
+## 2026-07-14 — M2b: 실 세션 no_quorum 대응 — 제안/투표 렌더링과 미투표 넛지 (feat/m2b-store)
+
+### 진행한 작업
+- 어댑터 수정 후 사용자 실 세션(3인 팀) 재실행: 인증·스트리밍·협업·제안·초안
+  보존(D-025)까지 전부 정상 동작. 단 **failed(no_quorum)** — 심의자 2명이
+  제안에 "동의합니다" 채팅만 보내고 vote_result를 호출하지 않아 voting_timeout
+  만료 시 전원 기권 처리.
+- 원인: 런타임이 result_proposal을 일반 채팅과 동일하게 렌더링(`[from: x]`
+  태그뿐) — 시스템 프롬프트의 투표 규칙만으로는 모델이 "지금이 투표
+  시점"임을 행동으로 연결하지 못함. 런타임 계층에서 2중 대응:
+  1. **merge_batch 타입별 렌더링** (agent.py): result_proposal은
+     `[result proposal from x]` 마커 + `[action required]` 투표 지시(채팅은
+     투표가 아님·미투표는 기권 명시), vote는 `[vote from x: approve|reject]`
+     + 사유로 렌더링.
+  2. **미투표 넛지** (session.py send_message): voting 중 스냅샷 심의자 중
+     미투표자(tally.pending)가 채팅을 보내면 tool result에 "you have NOT
+     voted ..." 리마인더를 부착.
+- 테스트 6개 추가(총 **444개 통과**, 통합 3회 반복 안정): merge_batch 렌더링
+  4건(신규 tests/test_agent.py) + 통합 2건(voting 중 채팅에 리마인더 부착 /
+  running 중에는 미부착).
+
+### 남은 것
+- 사용자 재실행으로 합의 도달 확인 → M2b 완료(PR).
+
+## 2026-07-14 — M2b: 실 API 스모크 → 구독 백엔드 실측 대응 + dead 상태 버그 (feat/m2b-store)
+
+### 진행한 작업
+- 사용자 실계정 스모크(3인 팀, chatgpt_oauth)에서 전 에이전트 client_error 사망 →
+  원인 진단을 위해 스크래치 스크립트로 구독 백엔드에 변형 요청을 직접 보내 400
+  본문을 실측. **구독 백엔드 강제 사항 3건 확정** (Research §6 실측 결과에 기록):
+  1. `store=false` 필수, 2. `stream=true` 필수(비스트리밍 400),
+  3. `prompt_cache_breakpoint` 거부("not supported on this model").
+- 어댑터 대응 (openai_client.py):
+  - chatgpt_oauth payload에 `store=False`/`stream=True` 강제, 명시적 캐시
+    breakpoint 미배치(이 모드에서 캐싱 opt-in 오프).
+  - `_stream_final_response` 신설 — SSE 이벤트를 집계해 완성 응답으로 복원.
+    실측상 종결 스냅샷(response.completed)의 output이 **비어 있어**,
+    `response.output_item.done`의 완성 아이템(message/function_call)을 수집해
+    `_ResponseView`로 보강(스냅샷 비변형, usage는 스냅샷 것 사용).
+  - response.failed는 LLMServerError로 정규화(error.message 미포함 — 마스킹).
+- 실계정 재검증: 텍스트 응답("안녕하세요!") + tool call(submit_result 인자 복원)
+  모두 어댑터 경로로 성공. **gpt-5.6-terra 구독 백엔드 지원 실측 확정.**
+- 테스트 12개 추가(총 **438개 통과**): payload store/stream/breakpoint 단언,
+  스트리밍 집계(완성/보강/스냅샷 우선/incomplete/failed/무종결), api_key 모드
+  비스트리밍 유지, 전원 사망 회귀(아래).
+
+### 오류/이슈 (수정 완료)
+- (agent/session) **dead 상태 덮어쓰기로 실패 사유 오분류**: 실 스모크에서 전원
+  사망인데 failed(agent_error)가 아닌 failed(idle)로 종료. 원인 — AgentLoop가
+  fatal 후에도 루프를 계속 돌며 IDLE을 보고해 `_agent_states`의 DEAD가 IDLE로
+  덮어써지고 생존자 수가 부풀어 agent_error 판정이 누락. 수정 2중:
+  ① AgentLoop `_dead` 플래그로 fatal 후 루프 완전 종료(인박스 소비도 중단),
+  ② SessionManager `_on_agent_state`에서 DEAD를 종결 상태로 보호(덮어쓰기 무시).
+  회귀 테스트를 수정 전 코드에 돌려 동일 오분류(IDLE≠AGENT_ERROR) 재현 확인.
+- (어댑터) 스트림 집계 1차 구현이 종결 스냅샷만 신뢰해 **text가 빈 문자열** —
+  구독 백엔드는 스냅샷에 output을 싣지 않는 것을 실측으로 확인, done 아이템
+  보강으로 해결.
+
+### 남은 것
+- 사용자 재실행으로 3인 팀 전체 세션 E2E 확인 → 통과 시 M2b 완료(PR).
+- device flow rate limit 미계측(실사용 중 관찰), 구독 백엔드 암묵 캐싱 여부 미확인.
+
+## 2026-07-14 — M2b: chatgpt_oauth CLI 연결 마무리 (feat/m2b-store)
+
+### 진행한 작업
+- 직전 WIP 커밋(a54030d)의 TODO 소화: 전체 테스트 스위트 실행(.venv 재구성 —
+  Python 3.14, editable install) → **426개 통과**. test_chatgpt_auth.py 16개
+  (device flow 왕복/refresh/실패 경로/토큰 마스킹/payload 화이트리스트/클라이언트
+  구성) 포함 확인.
+- CLI 실동작 스모크 3종:
+  - `--fake --db <임시경로>`: 전체 스택 관통 + SQLite 저장 확인 (exit 0).
+  - `--auth chatgpt_oauth` (토큰 없음): 로그인 안내 + exit 2 — 아래 버그 수정 후.
+  - `--auth api_key` (키 없음): 기존 안내 유지 확인 (exit 2).
+- README 정합화: 실행 절에 chatgpt_oauth 로그인·사용 커맨드와 `--db`/`--no-db`
+  추가, D-026 고지를 실제 구현 상태로 갱신(비공식 경로 제거 리스크, 사후 집계
+  예산, **미실측 항목 명시** — gpt-5.6 구독 백엔드 지원/stream·accept 헤더 강제),
+  M2b 상태를 "진행 중 (실 API 스모크 남음)"으로 표기.
+
+### 오류/이슈 (수정 완료)
+- (CLI) `--auth chatgpt_oauth`로 토큰 없이 실행하면 로그인 안내 대신 **원시
+  traceback**이 그대로 노출 — run.py `_real_llm_factory`가 OpenAIClient 구성
+  시점의 LLMAuthError를 잡지 않았다. api_key 분기와 동일하게 catch → 한 줄
+  안내(`error: chatgpt login required: ...`) + exit 2로 수정 (메시지는 토큰
+  미포함이라 그대로 출력해도 안전).
+
+### 남은 것 (M2b 완료 조건)
+- **실 API 스모크** — 사용자 자원 필요: OPENAI_API_KEY(api_key 모드) 및/또는
+  실계정 `chatgpt_auth login`(chatgpt_oauth 모드 — stream/accept 헤더 강제,
+  gpt-5.6 구독 백엔드 지원 실측이 여기서만 가능). Fake 통과만으로 M2 완료 처리
+  금지(체크리스트 원칙).
+
 ## 2026-07-14 — M2a 머지 (PR #2)
 
 ### 진행한 작업

@@ -263,7 +263,7 @@ agents:
 class DefaultTeamYamlTest(unittest.TestCase):
     """configs/team.default.yaml 실제 파일 검증 (D-027 — 조사/견제/상대등 3인 구조)."""
 
-    def test_default_team_yaml_has_three_agents_and_unanimous_approval(self) -> None:
+    def test_default_team_yaml_has_three_agents_and_approval_policy(self) -> None:
         self.assertTrue(
             DEFAULT_TEAM_YAML.exists(), f"missing default team file: {DEFAULT_TEAM_YAML}"
         )
@@ -275,9 +275,13 @@ class DefaultTeamYamlTest(unittest.TestCase):
         self.assertEqual(
             agent_names, {"research_daedeung", "critic_daedeung", "sangdaedeung"}
         )
-        self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
+        # D-030: 심의자 1명의 hang/턴 소진만으로 no_quorum이 보장되던 unanimous를
+        # 유효 투표자 전원 승인 + 최소 1표로 교체.
+        self.assertEqual(
+            team.termination.approval.mode, ApprovalPolicy.PARTICIPATING_UNANIMOUS
+        )
         self.assertEqual(team.termination.approval.voting_timeout, 120.0)
-        self.assertIsNone(team.termination.approval.minimum_votes)
+        self.assertEqual(team.termination.approval.minimum_votes, 1)
         self.assertEqual(team.termination.max_messages, 60)
         self.assertEqual(team.termination.token_budget, 100_000)
         self.assertEqual(team.termination.idle_timeout, 45.0)
@@ -298,9 +302,10 @@ class DefaultTeamYamlTest(unittest.TestCase):
             by_name["sangdaedeung"].capabilities,
             frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.SUBMIT_RESULT}),
         )
-        self.assertEqual(by_name["research_daedeung"].max_turns, 15)
-        self.assertEqual(by_name["critic_daedeung"].max_turns, 15)
-        self.assertEqual(by_name["sangdaedeung"].max_turns, 18)
+        # D-030: 토론+투표를 한 턴 예산 안에서 소화할 여유 (구독 모드 무과금).
+        self.assertEqual(by_name["research_daedeung"].max_turns, 25)
+        self.assertEqual(by_name["critic_daedeung"].max_turns, 25)
+        self.assertEqual(by_name["sangdaedeung"].max_turns, 25)
 
 
 class LoadTeamConfigErrorCasesTest(unittest.TestCase):

@@ -33,15 +33,16 @@ termination:
   idle_timeout: 45
 
   approval:
-    # 상대등이 제출자라면 research_daedeung과 critic_daedeung
-    # 두 에이전트가 모두 approve해야 한다 (엄밀한 화백 — 미투표는 승인 아님).
-    mode: unanimous
+    # 유효 투표자 전원 approve + 최소 1표 (2026-07-14 사용자 결정 — 실 세션에서
+    # 심의자 1명의 스트림 hang/턴 소진만으로 unanimous가 no_quorum을 보장하는
+    # 문제를 확인. 반대표는 여전히 반려로 동작한다).
+    mode: participating_unanimous
 
     # voting 전용 제한 시간. running의 idle_timeout과 독립 (D-019).
     timeout_seconds: 120
 
-    # participating_unanimous에서만 사용한다.
-    minimum_votes: null
+    # 최소 유효 투표 수 — 전원 기권으로 인한 무심의 승인을 막는다.
+    minimum_votes: 1
 
 agents:
   # =========================================================================
@@ -58,7 +59,7 @@ agents:
       - send_message
       - vote_result
 
-    max_turns: 15
+    max_turns: 25
 
     system_prompt: >-
       You are Research Daedeung, the research member of the Hwabaek council.
@@ -119,7 +120,7 @@ agents:
       - send_message
       - vote_result
 
-    max_turns: 15
+    max_turns: 25
 
     system_prompt: >-
       You are Critic Daedeung, the critical reviewer of the Hwabaek council.
@@ -181,7 +182,7 @@ agents:
       - send_message
       - submit_result
 
-    max_turns: 18
+    max_turns: 25
 
     system_prompt: >-
       You are Sangdaedeung, the facilitator and proposer of the Hwabaek council.

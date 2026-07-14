@@ -243,6 +243,128 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # session_status 이벤트 순서: running -> voting -> completed.
         self.assertEqual(coll.statuses(), ["running", "voting", "completed"])
 
+    async def test_voting_chat_gets_unvoted_reminder(self) -> None:
+        """voting 중 미투표 심의자의 채팅 tool result에 vote_result 리마인더가
+        붙고, 제안 메시지는 채팅과 구별되는 마커+투표 지시로 렌더링된다
+        (실 스모크 대응 — 심의자들이 채팅으로만 동의하다 전원 기권)."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [_submit("the deliverable")]),
+                ("analyst", [
+                    _text(),
+                    _chat("still checking", recipients=["writer"]),
+                    _vote("approve"),
+                ]),
+                ("reviewer", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,  # 채팅+투표 체인이 만료에 선점되지 않게 넉넉히
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        # 제안 렌더링: 마커 + 행동 지시가 analyst의 입력 턴에 존재한다.
+        analyst_inputs = "\n".join(
+            turn.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            if turn.content
+        )
+        self.assertIn("[result proposal from writer]", analyst_inputs)
+        self.assertIn("[action required]", analyst_inputs)
+
+        # voting 중 채팅의 tool result에 미투표 리마인더가 붙는다.
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        self.assertIn("you have NOT voted", tool_outputs)
+
+    async def test_bogus_proposal_id_vote_gets_corrective_result(self) -> None:
+        """지어낸 proposal_id로 투표하면 무시 대신 활성 제안 id를 알려주는 교정
+        메시지를 받고, 재투표(id 생략)로 합의가 완료된다 (실 스모크 대응)."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [_submit("the deliverable")]),
+                ("analyst", [
+                    _text(),
+                    _vote("approve", proposal_id="made-up-id"),
+                    _vote("approve"),
+                ]),
+                ("reviewer", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["analyst"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        # 교정 메시지: 무시 사실 + 활성 제안 id + 재시도 방법.
+        self.assertIn("made-up-id", tool_outputs)
+        self.assertIn("ACTIVE proposal", tool_outputs)
+        self.assertIn("omit proposal_id", tool_outputs)
+        # 두 번째(정상) 투표는 기록된다.
+        self.assertIn("vote recorded (approve)", tool_outputs)
+
+    async def test_tool_error_is_visible_as_agent_state_detail(self) -> None:
+        """도구 오류(예: running 중 vote_result)는 agent_state 이벤트 detail로
+        노출된다 — 실 세션에서 심의자의 투표 실패가 무흔적이었던 것에 대한 관측."""
+        manager, coll, _ = self._build(
+            [
+                ("writer", [
+                    _vote("approve"),  # running 중 투표 -> 상태 위반 ToolError
+                    _submit("the deliverable"),
+                ]),
+                ("analyst", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        details = [
+            e.payload.get("detail") or "" for e in coll.agent_states()
+            if e.payload["agent"] == "writer"
+        ]
+        self.assertTrue(
+            any(d.startswith("tool error [vote_result]") for d in details),
+            f"no tool error detail in {details}",
+        )
+
+    async def test_running_chat_has_no_vote_reminder(self) -> None:
+        """running 중(활성 제안 없음) 채팅에는 리마인더가 붙지 않는다."""
+        manager, _, fakes = self._build(
+            [
+                ("writer", [
+                    _chat("gathering input", recipients=["analyst"]),
+                    _submit("the deliverable"),
+                ]),
+                ("analyst", [_text(), _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+
+        tool_outputs = "\n".join(
+            result.content
+            for req in fakes["writer"].calls
+            for turn in req.turns
+            for result in turn.tool_results
+        )
+        self.assertIn("delivered", tool_outputs)
+        self.assertNotIn("you have NOT voted", tool_outputs)
+
     # -----------------------------------------------------------------------
     # 2) 반려 후 재제출 (version 1 -> 2)
     # -----------------------------------------------------------------------
@@ -414,6 +536,35 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(dead)
         self.assertIn("provider_error", dead[0].payload["detail"])
+
+    async def test_all_agents_dying_fails_agent_error_not_idle(self) -> None:
+        """3인 전원 사망 -> failed(agent_error), failed(idle) 아님 (회귀 — 실 스모크).
+
+        사망한 에이전트의 루프가 계속 돌며 IDLE을 보고하면 DEAD가 덮어써져 생존자
+        수가 부풀고, agent_error 판정이 누락된 채 idle 타임아웃으로 오분류된다."""
+        manager, coll, _ = self._build(
+            [
+                ("a", [LLMServerError("upstream 500")]),
+                ("b", [LLMServerError("upstream 500")]),
+                ("c", [LLMServerError("upstream 500")]),
+            ],
+            idle_timeout=0.2,  # 오분류 시 idle이 빠르게 발동하게 짧게 둔다
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.AGENT_ERROR)
+        # dead 확정 후 같은 에이전트의 idle 상태 이벤트는 발행되지 않는다.
+        seen_dead: set[str] = set()
+        for e in coll.agent_states():
+            agent, state = e.payload["agent"], e.payload["state"]
+            if state == "dead":
+                seen_dead.add(agent)
+            elif agent in seen_dead:
+                self.assertNotEqual(
+                    state, "idle", f"{agent} reported idle after dead"
+                )
 
     # -----------------------------------------------------------------------
     # 10) 취소 -> cancelled (취소 후 추가 API 호출 없음)

@@ -48,8 +48,13 @@ def _make_id_factory():
 
 
 def _print_event(event: Event) -> None:
-    """이벤트를 한 줄 요약으로 출력한다 (영어 ASCII)."""
+    """이벤트를 한 줄 요약으로 출력한다 (영어 ASCII, HH:MM:SS 타임스탬프).
+
+    타임스탬프는 실 세션 디버깅용이다 — 타이머(idle/voting) 만료나 응답 지연이
+    어느 구간에서 발생했는지 sequence만으로는 알 수 없다.
+    """
     p = event.payload
+    clock = event.created_at[11:19] if len(event.created_at) >= 19 else "--:--:--"
     if event.type is EventType.SESSION_STATUS:
         line = f"session -> {p['status']}"
         if p.get("fail_reason"):
@@ -73,7 +78,7 @@ def _print_event(event: Event) -> None:
         )
     else:  # RESULT
         line = f"result by {p['submitted_by']}"
-    print(f"[{event.sequence:04d}] {line}")
+    print(f"[{event.sequence:04d} {clock}] {line}")
 
 
 def _fake_team() -> TeamConfig:
@@ -108,14 +113,23 @@ def _fake_llm_factory(task: str):
     return factory
 
 
-def _real_llm_factory():
-    # OPENAI_API_KEY는 SDK가 읽는다 — 존재만 확인하고 값은 다루지 않는다(마스킹 원칙).
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("error: OPENAI_API_KEY is not set (required for real runs; use --fake for a hermetic smoke)")
-        raise SystemExit(2)
+def _real_llm_factory(auth_mode: str):
+    from hwabaek.llm.base import LLMAuthError
     from hwabaek.llm.openai_client import OpenAIClient
 
-    client = OpenAIClient()
+    if auth_mode == "api_key" and not os.environ.get("OPENAI_API_KEY"):
+        # 키 값은 다루지 않고 존재만 확인한다(마스킹 원칙).
+        print("error: OPENAI_API_KEY is not set (required for --auth api_key; "
+              "use --fake for a hermetic smoke)")
+        raise SystemExit(2)
+
+    # chatgpt_oauth: 토큰 없음/만료는 로그인 명령 안내로 종료한다 (D-026).
+    # LLMAuthError 메시지는 토큰을 싣지 않으므로 그대로 출력해도 안전하다.
+    try:
+        client = OpenAIClient(auth_mode=auth_mode)
+    except LLMAuthError as exc:
+        print(f"error: {exc}")
+        raise SystemExit(2) from None
 
     def factory(spec: AgentSpec) -> OpenAIClient:
         return client  # 어댑터는 상태 없는 호출 래퍼 — 에이전트 간 공유 가능
@@ -129,7 +143,13 @@ async def _run(args: argparse.Namespace) -> int:
         llm_factory = _fake_llm_factory(args.task)
     else:
         team = load_team_config(args.team)
-        llm_factory = _real_llm_factory()
+        llm_factory = _real_llm_factory(args.auth)
+
+    store = None
+    if not args.no_db:
+        from hwabaek.store.sqlite import SQLiteStore
+
+        store = SQLiteStore(args.db)
 
     manager = SessionManager(
         team,
@@ -138,8 +158,13 @@ async def _run(args: argparse.Namespace) -> int:
         clock=_clock,
         id_factory=_make_id_factory(),
         on_event=_print_event,
+        store=store,
     )
-    session = await manager.run()
+    try:
+        session = await manager.run()
+    finally:
+        if store is not None:
+            await store.close()
 
     print("-" * 60)
     print(f"status: {session.status.value}"
@@ -153,6 +178,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"unratified draft (by {session.draft_proposer}):")
         print(session.draft_result)
     print(f"tokens: {session.usage.total_tokens}")
+    if store is not None:
+        print(f"session {session.id} stored in {args.db}")
     return 0 if session.status is SessionStatus.COMPLETED else 1
 
 
@@ -169,6 +196,19 @@ def main() -> None:
     parser.add_argument(
         "--fake", action="store_true",
         help="hermetic smoke run with a scripted fake LLM (no network, no key)",
+    )
+    parser.add_argument(
+        "--auth", choices=["api_key", "chatgpt_oauth"], default="api_key",
+        help="llm auth mode (D-026); chatgpt_oauth is experimental and needs "
+             "'python -m hwabaek.llm.chatgpt_auth login' first",
+    )
+    parser.add_argument(
+        "--db", default="data/hwabaek.db",
+        help="sqlite path for session records (default: data/hwabaek.db)",
+    )
+    parser.add_argument(
+        "--no-db", action="store_true",
+        help="disable persistence for this run",
     )
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))

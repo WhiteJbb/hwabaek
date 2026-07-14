@@ -193,7 +193,15 @@ payload는 `Message.to_dict()`와 동일 스키마.
 - ~~`agent_error` 귀책을 실을 필드 없음~~ → `Session.fail_detail`(FAILED에서만 허용,
   `session_status.payload.fail_detail`로 노출) + `agent_state.payload.detail`(dead 사유) 추가.
 
-## 8. 내부 도메인 이벤트 taxonomy (후보 — M2 확정)
+## 8. 내부 도메인 이벤트 taxonomy (확정: 6개 집계 타입 유지 — D-028)
+
+**결정 (D-028)**: 세분 enum을 도입하지 않는다. 아래 논리적 이벤트들은 §2의 6개
+집계 `EventType`에 payload로 매핑된다 — 소비자는 payload 필드로 세분 의미를
+식별한다. 세분이 실제로 필요한 소비자가 M4에서 등장하면 payload 필드 추가 또는
+신규 타입으로 확장하며, 봉투는 이미 호환된다. `limit.warning`(예산 임박)은 현재
+별도 이벤트가 없다 — usage 이벤트에서 token_budget 대비 비율로 판단한다.
+
+아래는 참고 매핑이다:
 
 내부 도메인 이벤트(엔진이 상태 변화를 인식하는 세분 단위)와 SSE로 전송되는 집계 이벤트
 (§2의 6개 `EventType`)는 서로 다른 개념이다. 전자는 엔진 내부의 발행 지점(버스/세션

@@ -172,9 +172,11 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 - **M2a (완료: 2026-07-14)**: 인메모리 코어 — bus / consensus / session / agent +
   llm/openai_client(api_key 모드) + Fake LLM 통합 테스트(실패 경로 13종) +
   CLI smoke(`python -m hwabaek.run "..." --fake`). store 없이 완결 동작.
-- **M2b**: `store/sqlite.py` 접목(계약은 M1에서 확정됨) + chatgpt_oauth 인증 모드
-  (D-026) + 도메인 이벤트 taxonomy 확정(EventContract §8) + **실 API 스모크**
-  (Fake 통과만으로 M2 전체를 완료 처리하지 않는다 — 검증 원칙).
+- **M2b (완료: 2026-07-14)**: `store/sqlite.py` 접목(D-029 — sqlite3 +
+  to_thread, write-behind) + chatgpt_oauth 인증 모드(D-026 — 구독 백엔드 실측
+  제약은 Research §6) + 도메인 이벤트 taxonomy 확정(D-028) + **실 API 스모크
+  통과**(구독 백엔드, 3인 팀 합의 completed — 과정에서 dead 상태 오분류·투표
+  UX·스트림 hang 수정, 기본 팀 D-030 개정).
 
 - `store/sqlite.py` 구현 (D-017, M2b — 계약은 `store/base.py`에 확정): 스키마는
   계약의 레코드(sessions/팀 스냅샷=agents/messages/proposals/votes/session_events)에

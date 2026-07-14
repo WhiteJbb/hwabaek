@@ -906,6 +906,12 @@ class Event:
             "payload": self.payload,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Event":
+        payload = dict(data)
+        payload["type"] = EventType(payload["type"])
+        return cls(**payload)
+
 
 def make_session_status_event(
     event_id: str, sequence: int, session: Session, created_at: str

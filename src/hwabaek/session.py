@@ -18,7 +18,10 @@ Plan 코어 의미론 §3~§7을 구현한다:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import logging
+from collections.abc import Callable, Coroutine
+
+logger = logging.getLogger(__name__)
 
 from hwabaek.agent import AgentLoop, SessionCommands, ToolError
 from hwabaek.bus import MessageBus
@@ -49,6 +52,7 @@ from hwabaek.contracts import (
     make_vote_status_event,
 )
 from hwabaek.llm.base import LLMClient, LLMError
+from hwabaek.store.base import Store
 
 
 class SessionManager:
@@ -63,8 +67,14 @@ class SessionManager:
         clock: Callable[[], str],
         id_factory: Callable[[], str],
         on_event: Callable[[Event], None] | None = None,
+        store: Store | None = None,
     ) -> None:
-        """llm_factory는 AgentSpec을 받아 그 에이전트의 LLMClient를 반환한다."""
+        """llm_factory는 AgentSpec을 받아 그 에이전트의 LLMClient를 반환한다.
+
+        store를 주입하면 세션·메시지·제안·투표·이벤트가 write-behind로 영속화된다
+        (D-017) — 단일 라이터 태스크가 순서를 보존하며, 저장 실패는 세션을 죽이지
+        않고 로그로만 남긴다(관측 손실 < 세션 손실).
+        """
         self._team = team
         self._task = task
         self._llm_factory = llm_factory
@@ -103,6 +113,8 @@ class SessionManager:
         self._vote_deadline: float | None = None
         self._last_activity: float = 0.0
         self._rejected_commands: list[str] = []  # 종료 후 거부된 명령의 감사 기록
+        self._store = store
+        self._write_queue: asyncio.Queue[Callable[[], Coroutine]] | None = None
 
     # ------------------------------------------------------------------
     # 실행
@@ -120,6 +132,12 @@ class SessionManager:
         """에이전트 기동 → 종료 조건 도달까지 조정 → 종료 상태 Session 반환."""
         loop = asyncio.get_running_loop()
         self._last_activity = loop.time()
+        writer: asyncio.Task | None = None
+        if self._store is not None:
+            self._write_queue = asyncio.Queue()
+            writer = asyncio.create_task(self._write_behind(), name="store-writer")
+            self._persist_team_snapshot()
+            self._persist_session()
         self._emit_session_status()
 
         for spec in self._team.agents:
@@ -146,11 +164,51 @@ class SessionManager:
             for task in self._tasks:
                 task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
+            # 보류 중인 영속화 쓰기를 전부 반영한 뒤 라이터를 내린다 (flush).
+            if writer is not None and self._write_queue is not None:
+                await self._write_queue.join()
+                writer.cancel()
+                await asyncio.gather(writer, return_exceptions=True)
         return self._session
 
     def cancel(self) -> None:
         """사용자 취소 — 최우선 종료 사유 (D-021 우선순위)."""
         self._finalize(SessionStatus.CANCELLED)
+
+    # ------------------------------------------------------------------
+    # 영속화 (write-behind, D-017)
+    # ------------------------------------------------------------------
+
+    async def _write_behind(self) -> None:
+        """단일 라이터 — 큐 순서대로 store에 반영한다. 실패는 로그만(세션 보호)."""
+        assert self._write_queue is not None
+        while True:
+            factory = await self._write_queue.get()
+            try:
+                await factory()
+            except Exception:
+                logger.exception("store write failed (session continues)")
+            finally:
+                self._write_queue.task_done()
+
+    def _enqueue_write(self, factory: Callable[[], Coroutine]) -> None:
+        if self._write_queue is not None:
+            self._write_queue.put_nowait(factory)
+
+    def _persist_session(self) -> None:
+        if self._store is not None:
+            session = self._session  # 현재 스냅샷을 캡처 (이후 변이와 무관)
+            self._enqueue_write(lambda: self._store.save_session(session))
+
+    def _persist_team_snapshot(self) -> None:
+        if self._store is not None:
+            self._enqueue_write(
+                lambda: self._store.save_team_snapshot(self._session.id, self._team)
+            )
+
+    def _persist_proposal(self, proposal: ResultProposal) -> None:
+        if self._store is not None:
+            self._enqueue_write(lambda: self._store.save_proposal(proposal))
 
     # ------------------------------------------------------------------
     # 명령 처리 (에이전트 → 세션) — 상태별 허용 규칙 §17
@@ -183,7 +241,24 @@ class SessionManager:
             )
         except ContractError as error:
             raise ToolError(str(error)) from error
-        return f"delivered (message {message.id})"
+        result = f"delivered (message {message.id})"
+        # voting 중 미투표 심의자가 채팅만 보내면 도구 결과로 상기시킨다 —
+        # 실 스모크에서 심의자들이 채팅으로 동의만 표하다 전원 기권된 것에 대한
+        # 런타임 넛지 (pending은 스냅샷 심의자 중 미투표자만 담는다).
+        state = self._consensus.active
+        if (
+            self._session.status is SessionStatus.VOTING
+            and state is not None
+            and sender in state.tally.pending
+        ):
+            result += (
+                "; reminder: you have NOT voted on the active proposal "
+                f"{state.proposal.id} (version {state.proposal.version}) yet - "
+                "call vote_result (approve or reject, proposal_id may be "
+                "omitted) before the voting timeout, or you will be counted "
+                "as abstaining"
+            )
+        return result
 
     def submit_result(self, sender: str, content: str) -> str:
         self._guard("submit_result", sender)
@@ -198,6 +273,10 @@ class SessionManager:
             state = self._consensus.open_proposal(sender, content, alive)
         except ConsensusError as error:
             raise ToolError(str(error)) from error
+        self._persist_proposal(state.proposal)
+        superseded = self._consensus.last_superseded
+        if superseded is not None:
+            self._persist_proposal(superseded)
         self._bus.post(
             sender=sender,
             recipients=(BROADCAST,),
@@ -244,8 +323,22 @@ class SessionManager:
         except ContractError as error:
             raise ToolError(str(error)) from error
         if result is None:
-            return "vote ignored: stale or unknown proposal"
+            # 잘못된(지어낸) proposal_id는 막다른 응답 대신 교정 정보를 준다 —
+            # 실 스모크에서 심의자가 "unknown proposal"만 반복 수신하고 활성
+            # 제안이 없다고 오판해 투표를 포기한 것에 대한 대응.
+            active = self._consensus.active
+            if active is not None:
+                return (
+                    f"vote ignored: proposal id {proposal_id!r} is stale or "
+                    f"unknown. The ACTIVE proposal is {active.proposal.id} "
+                    f"(version {active.proposal.version}, by "
+                    f"{active.proposal.proposer}). Call vote_result again and "
+                    "omit proposal_id to vote on it."
+                )
+            return "vote ignored: stale or unknown proposal (none active)"
         vote, state = result
+        if self._store is not None:
+            self._enqueue_write(lambda: self._store.append_vote(vote))
         self._bus.post(
             sender=sender,
             recipients=(BROADCAST,),
@@ -270,11 +363,13 @@ class SessionManager:
         if state.outcome is ProposalOutcome.APPROVED:
             self._complete(state)
         elif state.outcome is ProposalOutcome.REJECTED:
-            self._consensus.resolve(ProposalOutcome.REJECTED)
+            rejected = self._consensus.resolve(ProposalOutcome.REJECTED)
+            self._persist_proposal(rejected)
             self._vote_deadline = None
             self._transition(SessionStatus.RUNNING)
         else:  # NO_QUORUM
             proposal = self._consensus.resolve(ProposalOutcome.NO_QUORUM)
+            self._persist_proposal(proposal)
             detail = (
                 "no quorum: pending="
                 + ",".join(sorted(state.tally.pending))
@@ -290,6 +385,7 @@ class SessionManager:
 
     def _complete(self, state: ConsensusState) -> None:
         proposal = self._consensus.resolve(ProposalOutcome.APPROVED)
+        self._persist_proposal(proposal)
         self._finalize(
             SessionStatus.COMPLETED,
             result=proposal.content,
@@ -298,6 +394,7 @@ class SessionManager:
 
     def _transition(self, new_status: SessionStatus) -> None:
         self._session = self._session.with_status(new_status)
+        self._persist_session()
         self._emit_session_status()
 
     def _finalize(
@@ -328,6 +425,7 @@ class SessionManager:
             draft_proposer=draft.proposer if draft else None,
             finished_at=self._clock(),
         )
+        self._persist_session()
         self._emit_session_status()
         if status is SessionStatus.COMPLETED:
             self._emit(make_result_event(
@@ -373,6 +471,8 @@ class SessionManager:
 
     def _on_bus_message(self, message: Message) -> None:
         self._touch()
+        if self._store is not None:
+            self._enqueue_write(lambda: self._store.append_message(message))
         self._emit(make_message_event(self._id_factory(), self._next_seq(), message))
         if self._bus.total_posted() > self._team.termination.max_messages:
             self._finalize(SessionStatus.FAILED, fail_reason=FailReason.MESSAGES)
@@ -381,6 +481,14 @@ class SessionManager:
         self, agent: str, state: AgentState, detail: str | None = None
     ) -> None:
         if self._session.is_terminal:
+            return
+        # DEAD는 에이전트의 종결 상태 — 이후 보고(IDLE 등)가 덮어쓰지 못하게 한다.
+        # 덮어쓰면 생존자 수가 부풀어 agent_error 판정이 누락된다 (이중 방어;
+        # 1차 방어는 AgentLoop가 fatal 후 루프를 끝내는 것).
+        if (
+            self._agent_states.get(agent) is AgentState.DEAD
+            and state is not AgentState.DEAD
+        ):
             return
         if self._agent_states.get(agent) is state and detail is None:
             return
@@ -396,6 +504,7 @@ class SessionManager:
         if self._session.is_terminal:
             return
         self._session = self._session.with_usage(usage)
+        self._persist_session()
         self._per_agent_usage[agent] = (
             self._per_agent_usage.get(agent, Usage()) + usage
         )
@@ -441,6 +550,8 @@ class SessionManager:
         return seq
 
     def _emit(self, event: Event) -> None:
+        if self._store is not None:
+            self._enqueue_write(lambda: self._store.append_event(event))
         if self._on_event is not None:
             self._on_event(event)
 

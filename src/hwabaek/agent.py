@@ -13,7 +13,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from hwabaek.contracts import AgentState, ContractError, Message, Usage
+from hwabaek.contracts import (
+    AgentState,
+    ContractError,
+    Message,
+    MessageType,
+    Usage,
+)
 from hwabaek.llm.base import (
     LLMClient,
     LLMError,
@@ -123,10 +129,33 @@ _TRUNCATION_NOTICE = (
 
 
 def merge_batch(messages: list[Message]) -> str:
-    """수신 배치를 발신자 태깅으로 병합해 하나의 user 턴 본문을 만든다 (§2)."""
+    """수신 배치를 발신자 태깅으로 병합해 하나의 user 턴 본문을 만든다 (§2).
+
+    타입별 렌더링: 제안·투표를 일반 채팅과 구별되게 표기한다 — 실 스모크에서
+    제안이 채팅과 동일하게 보여 심의자들이 vote_result 대신 채팅으로만 동의를
+    표하다 전원 기권(no_quorum) 처리된 것에 대한 대응. 제안에는 즉시 투표하라는
+    행동 지시를 함께 싣는다(투표 권한이 없는 수신자를 위해 조건부 문구).
+    """
     parts = []
     for message in messages:
-        parts.append(f"[from: {message.sender}]\n{message.content}")
+        if message.type is MessageType.RESULT_PROPOSAL:
+            parts.append(
+                f"[result proposal from {message.sender}] "
+                f"(proposal_id: {message.proposal_id})\n{message.content}\n"
+                "[action required] The session is now VOTING on the proposal "
+                "above. If you have the vote_result tool, cast your vote NOW "
+                "(approve, or reject with a concrete reason); you may omit "
+                "proposal_id to vote on this active proposal. Discussion is "
+                "allowed, but a chat message does NOT count as a vote, and "
+                "unvoted members are treated as abstaining when the voting "
+                "timeout expires."
+            )
+        elif message.type is MessageType.VOTE:
+            decision = message.vote.value if message.vote else "vote"
+            reason = f"\n{message.content}" if message.content else ""
+            parts.append(f"[vote from {message.sender}: {decision}]{reason}")
+        else:
+            parts.append(f"[from: {message.sender}]\n{message.content}")
     return "\n\n".join(parts)
 
 
@@ -182,6 +211,7 @@ class AgentLoop:
         self._history_limit = history_limit
         self._turns: list[Turn] = []
         self._calls_made = 0
+        self._dead = False
 
     async def run(self) -> None:
         """루프 본체. 세션 종료 시 SessionManager가 태스크를 취소한다."""
@@ -196,7 +226,9 @@ class AgentLoop:
         self._turns.append(first)
         await self._think_and_act()
 
-        while self._calls_made < self._max_turns:
+        # dead면 즉시 종료 — 루프를 계속 돌면 IDLE 보고가 DEAD 상태를 덮어써
+        # 생존자 계산이 틀어진다 (failed(agent_error)가 failed(idle)로 오분류).
+        while not self._dead and self._calls_made < self._max_turns:
             self._hooks.on_state(self.name, AgentState.IDLE)
             await self._bus.wait_for_messages(self.name)
             batch = self._bus.drain(self.name)
@@ -205,9 +237,10 @@ class AgentLoop:
             self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
             await self._think_and_act()
 
-        self._hooks.on_state(
-            self.name, AgentState.IDLE, detail="max_turns exhausted"
-        )
+        if not self._dead:
+            self._hooks.on_state(
+                self.name, AgentState.IDLE, detail="max_turns exhausted"
+            )
 
     async def _think_and_act(self) -> None:
         """LLM 호출 1회 + 후속 tool_use 체인 처리 (체인도 호출 수에 포함)."""
@@ -224,7 +257,9 @@ class AgentLoop:
             try:
                 response = await self._llm.complete(request)
             except LLMError as error:
-                # SDK 자체 재시도가 소진된 뒤 도달한다 — 세션에 귀책과 함께 보고.
+                # SDK 자체 재시도가 소진된 뒤 도달한다 — 세션에 귀책과 함께 보고하고
+                # 루프를 완전히 끝낸다(dead 에이전트는 인박스 소비도 중단).
+                self._dead = True
                 self._hooks.on_fatal_error(self.name, error)
                 return
             self._calls_made += 1
@@ -250,6 +285,14 @@ class AgentLoop:
             output = self._dispatch(call)
             return ToolResult(tool_call_id=call.id, content=output)
         except (ToolError, ContractError) as error:
+            # 관측: 도구 오류는 모델에게만 반환되고 이벤트로는 보이지 않아 실 세션
+            # 디버깅이 불가능했다(예: 심의자의 vote_result 실패가 로그에 무흔적).
+            # 상태는 그대로 THINKING이되 detail로 오류를 노출한다.
+            self._hooks.on_state(
+                self.name,
+                AgentState.THINKING,
+                detail=f"tool error [{call.name}]: {str(error)[:120]}",
+            )
             return ToolResult(
                 tool_call_id=call.id, content=str(error), is_error=True
             )

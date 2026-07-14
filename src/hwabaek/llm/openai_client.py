@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 import openai
 
 from hwabaek.contracts import Usage
@@ -49,16 +50,57 @@ from hwabaek.llm.base import (
     StopReason,
     ToolCall,
 )
+from hwabaek.llm.chatgpt_auth import (
+    CHATGPT_ACCOUNT_ID_HEADER,
+    CHATGPT_API_BASE,
+    DEFAULT_ORIGINATOR,
+    DEFAULT_USER_AGENT,
+    ChatGPTTokenProvider,
+)
 
 # 캐시 최소 수명 — SDK가 현재 허용하는 유일한 값("30m", Research §6).
 _CACHE_TTL = "30m"
+
+# 구독(chatgpt_oauth) 스트리밍 클라이언트의 명시적 타임아웃 — 실 세션에서 에이전트
+# 1명이 스트림 무응답으로 세션 내내 THINKING에 갇힌 것에 대한 방어. read는 SSE
+# 청크 사이 간격에 적용되므로, 간격이 이 값을 넘으면 LLMTimeoutError로 정규화되어
+# 에이전트가 dead 처리되고 세션은 지속된다 (무한 대기 방지 — 실패 경로가 제품이다).
+# api_key(비스트리밍) 모드는 SDK 기본(600s)을 유지한다 — 전체 응답 대기에 read가
+# 통째로 적용되므로 짧게 잡으면 긴 생성이 오탐된다.
+_CHATGPT_TIMEOUT = httpx.Timeout(connect=15.0, read=180.0, write=30.0, pool=15.0)
+
+# 인증 모드(D-026) — api_key(기본·공식) | chatgpt_oauth(구독 device flow).
+AUTH_API_KEY = "api_key"
+AUTH_CHATGPT_OAUTH = "chatgpt_oauth"
+
+# chatgpt_oauth(구독) 백엔드가 허용하는 top-level 필드 화이트리스트.
+# litellm chatgpt/responses/transformation.py의 allowed_keys와 동일하게 확정했다 —
+# 이 집합 밖의 필드(max_output_tokens, metadata, prompt_cache_options 등)는 구독
+# 백엔드가 거부하므로 제거한다. 토큰 예산은 사후 집계로 강제한다(D-026: 사전 상한 불가).
+_CHATGPT_ALLOWED_KEYS = frozenset(
+    {
+        "model",
+        "input",
+        "instructions",
+        "stream",
+        "store",
+        "include",
+        "tools",
+        "tool_choice",
+        "reasoning",
+        "previous_response_id",
+        "truncation",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # 요청 매핑 — LLMRequest -> responses.create kwargs
 # ---------------------------------------------------------------------------
 
-def build_request_payload(request: LLMRequest) -> dict[str, Any]:
+def build_request_payload(
+    request: LLMRequest, *, auth_mode: str = AUTH_API_KEY
+) -> dict[str, Any]:
     """LLMRequest를 responses.create 호출 kwargs(dict)로 변환한다.
 
     - system_prompt -> instructions
@@ -66,20 +108,33 @@ def build_request_payload(request: LLMRequest) -> dict[str, Any]:
     - tools -> function 도구 정의
     - cache_system_prefix -> prompt_cache_options + 접두사 끝 명시적 breakpoint
 
-    순수 함수다(네트워크·시계 없음) — 밀폐 단위 검증 대상.
+    auth_mode가 chatgpt_oauth면 구독 백엔드에 맞게 조정한다 (2026-07-14 실측):
+    - 화이트리스트 외 top-level 필드(max_output_tokens 등) 제거 — 미제거 시 400.
+    - `store=False`·`stream=True` 강제 — 미설정 시 각각 400 "Store must be set
+      to false" / "Stream must be set to true".
+    - 명시적 캐시 breakpoint 미배치 — 400 "prompt_cache_breakpoint is not
+      supported on this model" (캐싱 opt-in 자체를 끈다).
+    나머지 매핑은 api_key 모드와 동일하다(순수 함수, 네트워크·시계 없음).
     """
+    chatgpt = auth_mode == AUTH_CHATGPT_OAUTH
+    cache_prefix = request.cache_system_prefix and not chatgpt
     payload: dict[str, Any] = {
         "model": request.model,
         "instructions": request.system_prompt,
         "max_output_tokens": request.max_output_tokens,
-        "input": _build_input(request.turns, cache_prefix=request.cache_system_prefix),
+        "input": _build_input(request.turns, cache_prefix=cache_prefix),
     }
     if request.tools:
         payload["tools"] = [_tool_param(tool) for tool in request.tools]
-    if request.cache_system_prefix:
+    if cache_prefix:
         # 캐싱을 명시적으로 opt-in한다(30분 최소 수명). 명시적 breakpoint는 접두사
         # 끝(첫 텍스트 블록)에 함께 부여했다 — _build_input 참조.
         payload["prompt_cache_options"] = {"ttl": _CACHE_TTL}
+    if chatgpt:
+        payload = {k: v for k, v in payload.items() if k in _CHATGPT_ALLOWED_KEYS}
+        # complete()가 stream 플래그를 보고 이벤트를 집계해 완성 응답으로 되돌린다.
+        payload["store"] = False
+        payload["stream"] = True
     return payload
 
 
@@ -359,21 +414,60 @@ def _summary(label: str, exc: BaseException) -> str:
 # 클라이언트
 # ---------------------------------------------------------------------------
 
-class OpenAIClient:
-    """OpenAI Responses API 기반 LLMClient 구현(api_key 모드, D-026).
+class _ResponseView:
+    """Response 스냅샷의 읽기 뷰 — 일부 속성만 재정의한다(SDK 모델 비변형).
 
-    재시도는 SDK 기본(max_retries=2)에 맡기고 자체 재시도 루프는 두지 않는다.
-    스트리밍은 쓰지 않고 완성된 응답 1건을 반환한다(계약 준수).
+    구독 백엔드의 종결 스냅샷처럼 output이 비어 있는 응답을, 스트림에서 수집한
+    완성 아이템으로 보강할 때 쓴다. parse_response는 getattr만 사용하므로
+    output 외 속성(status/usage/model/incomplete_details)은 원본에 위임된다.
     """
 
-    def __init__(self, api_key: str | None = None, *, base_url: str | None = None) -> None:
-        # 인증 분기(D-026: api_key | chatgpt_oauth)가 나중에 끼워질 수 있게 클라이언트
-        # 구성은 _build_client 한 곳에 모은다. 지금은 api_key 모드만.
-        self._client = self._build_client(api_key=api_key, base_url=base_url)
+    def __init__(self, base: Any, **overrides: Any) -> None:
+        self._base = base
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._base, name)
+
+
+class OpenAIClient:
+    """OpenAI Responses API 기반 LLMClient 구현 — 인증 모드 2종(D-026).
+
+    - api_key(기본·공식): OPENAI_API_KEY 또는 주입 키로 표준 API 호출(비스트리밍).
+    - chatgpt_oauth(선택·비공식): ChatGPT 구독 device flow 토큰으로 구독 백엔드 호출.
+      구독 백엔드가 거부하는 필드는 payload에서 제거하고(build_request_payload),
+      토큰 예산은 사후 집계로만 강제한다. 백엔드가 스트리밍을 강제하므로(실측)
+      내부적으로 SSE 이벤트를 집계해 완성 응답 1건으로 되돌린다 — LLMClient
+      계약(완성 응답 반환)은 두 모드에서 동일하다.
+
+    재시도는 SDK 기본(max_retries=2)에 맡기고 자체 재시도 루프는 두지 않는다.
+    """
+
+    def __init__(
+        self,
+        auth_mode: str = AUTH_API_KEY,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        token_provider: ChatGPTTokenProvider | None = None,
+    ) -> None:
+        # 인증 분기(D-026: api_key | chatgpt_oauth). 클라이언트 구성은 모드별 빌더
+        # 한 곳에 모으고, complete/매핑 경로는 auth_mode만 참조한다(핫패스 무분기).
+        self._auth_mode = auth_mode
+        if auth_mode == AUTH_CHATGPT_OAUTH:
+            self._client = self._build_chatgpt_client(
+                token_provider=token_provider, base_url=base_url
+            )
+        elif auth_mode == AUTH_API_KEY:
+            self._client = self._build_client(api_key=api_key, base_url=base_url)
+        else:
+            raise LLMAuthError(f"unknown auth_mode: {auth_mode!r}")
 
     @staticmethod
     def _build_client(*, api_key: str | None, base_url: str | None) -> Any:
-        """AsyncOpenAI 클라이언트를 구성한다.
+        """AsyncOpenAI 클라이언트를 구성한다(api_key 모드).
 
         api_key 미지정 시 SDK가 OPENAI_API_KEY 환경변수를 사용한다. base_url은 지정
         시에만 넘긴다. 키는 클라이언트 내부에만 두고 어디에도 노출하지 않는다.
@@ -385,16 +479,95 @@ class OpenAIClient:
             kwargs["base_url"] = base_url
         return openai.AsyncOpenAI(**kwargs)
 
+    @staticmethod
+    def _build_chatgpt_client(
+        *, token_provider: ChatGPTTokenProvider | None, base_url: str | None
+    ) -> Any:
+        """AsyncOpenAI 클라이언트를 구독(chatgpt_oauth) 백엔드용으로 구성한다.
+
+        토큰 프로바이더에서 유효 토큰·account_id를 받아(필요 시 refresh) Bearer 인증과
+        계정 헤더를 구성한다. base_url·헤더 구성은 litellm chatgpt 프로바이더 소스에서
+        확정했다. access_token은 SDK의 api_key로 전달돼 `Authorization: Bearer`로
+        나가며(로그·repr 미노출), account_id 등 부가 헤더는 default_headers로 싣는다.
+
+        주의(실측 필요): 토큰은 구성 시점에 1회 확보한다 — 세션 도중 만료 시 자동
+        재발급은 하지 않는다(다음 세션에서 refresh). 구독 백엔드의 stream 강제·
+        accept 헤더 요구는 실 로그인으로 검증해야 한다(README 고지).
+        """
+        provider = token_provider or ChatGPTTokenProvider()
+        access_token, account_id = provider.get_auth()
+        headers = {
+            "originator": DEFAULT_ORIGINATOR,
+            "user-agent": DEFAULT_USER_AGENT,
+        }
+        if account_id:
+            headers[CHATGPT_ACCOUNT_ID_HEADER] = account_id
+        return openai.AsyncOpenAI(
+            api_key=access_token,
+            base_url=base_url or CHATGPT_API_BASE,
+            default_headers=headers,
+            timeout=_CHATGPT_TIMEOUT,
+        )
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """요청 1건을 수행하고 정규화된 응답을 반환한다.
 
-        payload 빌드 -> responses.create -> parse. SDK 예외는 map_error로 변환해
-        raise하며, 원본 예외를 체이닝하지 않는다(`from None`) — 원본 메시지에 섞일 수
-        있는 API 키가 트레이스백에 노출되지 않게 한다.
+        payload 빌드 -> responses.create -> parse. payload에 stream이 켜져 있으면
+        (chatgpt_oauth — 백엔드 강제) 이벤트 스트림을 집계해 최종 응답으로 되돌린다.
+        SDK 예외는 map_error로 변환해 raise하며, 원본 예외를 체이닝하지 않는다
+        (`from None`) — 원본 메시지에 섞일 수 있는 API 키가 트레이스백에 노출되지
+        않게 한다.
         """
-        payload = build_request_payload(request)
+        payload = build_request_payload(request, auth_mode=self._auth_mode)
         try:
-            raw = await self._client.responses.create(**payload)
+            if payload.get("stream"):
+                raw = await self._stream_final_response(payload)
+            else:
+                raw = await self._client.responses.create(**payload)
         except openai.OpenAIError as exc:
             raise map_error(exc) from None
         return parse_response(raw)
+
+    async def _stream_final_response(self, payload: dict[str, Any]) -> Any:
+        """이벤트 스트림을 소비해 최종 Response 객체를 반환한다.
+
+        종결 이벤트(response.completed / response.incomplete / response.failed)의
+        Response 스냅샷(usage 포함)을 parse_response에 넘긴다(비스트리밍 경로와 매핑
+        단일화). 단, 구독 백엔드는 종결 스냅샷에 output을 싣지 않으므로(2026-07-14
+        실측 — output 빈 배열) response.output_item.done 이벤트의 완성 아이템
+        (message/function_call)을 모아 보강한다. 텍스트 델타는 조립하지 않는다 —
+        done 아이템에 전체 텍스트가 실린다. incomplete는 parse_response가
+        MAX_TOKENS로 정규화한다.
+        """
+        final: Any = None
+        done_items: list[Any] = []
+        stream = await self._client.responses.create(**payload)
+        async with stream:
+            async for event in stream:
+                etype = getattr(event, "type", "")
+                if etype == "response.output_item.done":
+                    item = getattr(event, "item", None)
+                    if item is not None:
+                        done_items.append(item)
+                elif etype in (
+                    "response.completed",
+                    "response.incomplete",
+                    "response.failed",
+                ):
+                    final = getattr(event, "response", None)
+                    break
+        if final is None:
+            raise LLMServerError(
+                "OpenAI stream ended without a terminal response event"
+            )
+        if getattr(final, "status", None) == "failed":
+            # 실패 응답의 error.message는 싣지 않는다(마스킹 원칙) — code만 요약.
+            error = getattr(final, "error", None)
+            code = getattr(error, "code", None) if error is not None else None
+            raise LLMServerError(
+                f"OpenAI response failed; code={code or 'unknown'}"
+            )
+        if not (getattr(final, "output", None) or ()) and done_items:
+            # 스냅샷을 변형하지 않고 parse_response가 읽는 속성만 가진 뷰로 보강한다.
+            return _ResponseView(final, output=done_items)
+        return final
