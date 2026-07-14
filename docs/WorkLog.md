@@ -38,7 +38,7 @@
 ### 후속
 - SQLite 과거 이벤트의 페이지 단위 replay/compaction은 M5 견고화에서 처리.
 - M4 착수 시 JSON API와 충돌하지 않는 대시보드 URL namespace(`/app/...` 또는 hash)를 확정.
-- M3 PR 생성 후 squash merge.
+- M3 PR #4 생성 — 리뷰 후 squash merge.
 
 ## 2026-07-14 — M2b 완료: 실 세션 합의 성공 (feat/m2b-store)
 

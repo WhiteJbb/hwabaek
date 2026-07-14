@@ -12,7 +12,7 @@
 - [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 검토와 발견 사항 수정
 - [x] README·Plan·IA·EventContract·DecisionLog·WorkLog 정합
 - [x] `feat/m3-server` 브랜치 사용, git 산출물 AI 흔적 없음
-- [ ] PR 생성 및 squash merge
+- [x] PR #4 생성 (`feat/m3-server` → `main`); squash merge 대기
 
 ## 기능/정확성
 
