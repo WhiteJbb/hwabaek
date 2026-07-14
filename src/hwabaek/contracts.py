@@ -334,10 +334,14 @@ class ApprovalConfig:
     voting_timeout은 voting 상태 전용 타이머다 — running의 idle_timeout과 분리
     (D-019). 만료 시 미투표는 기권 처리되며 어떤 모드에서도 승인으로 간주하지
     않는다. minimum_votes는 participating_unanimous 전용 유효 투표 하한.
+
+    기본 120초 (D-025): 심의자는 진행 중 LLM 호출을 마친 뒤 다음 배치에서 제안을
+    수신·검토·투표하므로, 30초는 기본 unanimous에서 timeout-기권-no_quorum 실패를
+    양산한다 — 투표는 세션의 맨 끝(작업이 가장 많이 투입된 시점)에 일어난다.
     """
 
     mode: ApprovalPolicy = ApprovalPolicy.UNANIMOUS
-    voting_timeout: float = 30.0
+    voting_timeout: float = 120.0
     minimum_votes: int | None = None
 
     def __post_init__(self) -> None:
@@ -667,6 +671,10 @@ class Session:
     - FAILED이면 fail_reason 필수, 그 외 상태에서는 금지.
     - fail_detail(귀책 등 실패 상세 — 오류 귀책 원칙)은 FAILED에서만 허용.
     - COMPLETED이면 result/submitted_by 필수.
+    - draft_result/draft_proposer(미승인 초안 보존, D-025)는 FAILED에서만 허용,
+      둘은 함께 설정. 투표까지 갔지만 확정되지 못한 세션(no_quorum, voting 중
+      예산 초과 등)에서 마지막 제안 내용을 사용자에게 보존한다 — 승인된
+      result와는 구분되는 필드(결과 카드가 아니라 "미승인 초안"으로 표시).
     - 종료 상태(TERMINAL_STATUSES)이면 finished_at 필수, 그 외에는 금지.
     """
 
@@ -679,6 +687,8 @@ class Session:
     submitted_by: str | None = None
     fail_reason: FailReason | None = None
     fail_detail: str | None = None
+    draft_result: str | None = None
+    draft_proposer: str | None = None
     usage: Usage = field(default_factory=Usage)
     finished_at: str | None = None
 
@@ -690,6 +700,10 @@ class Session:
             raise ContractError("fail_reason is required iff status is failed")
         if self.fail_detail is not None and self.status is not SessionStatus.FAILED:
             raise ContractError("fail_detail is only allowed when status is failed")
+        if (self.draft_result is None) != (self.draft_proposer is None):
+            raise ContractError("draft_result and draft_proposer must be set together")
+        if self.draft_result is not None and self.status is not SessionStatus.FAILED:
+            raise ContractError("draft_result is only allowed when status is failed")
         if self.status is SessionStatus.COMPLETED and (
             self.result is None or self.submitted_by is None
         ):
@@ -715,6 +729,8 @@ class Session:
         fail_detail: str | None = None,
         result: str | None = None,
         submitted_by: str | None = None,
+        draft_result: str | None = None,
+        draft_proposer: str | None = None,
         finished_at: str | None = None,
     ) -> "Session":
         """상태 전이. 허용 전이표와 불변식을 강제하고 새 Session을 반환한다.
@@ -732,6 +748,8 @@ class Session:
             status=new_status,
             fail_reason=fail_reason,
             fail_detail=fail_detail,
+            draft_result=draft_result,
+            draft_proposer=draft_proposer,
             result=result if result is not None else (
                 None if new_status is SessionStatus.RUNNING else self.result
             ),
@@ -752,6 +770,8 @@ class Session:
             "submitted_by": self.submitted_by,
             "fail_reason": self.fail_reason.value if self.fail_reason else None,
             "fail_detail": self.fail_detail,
+            "draft_result": self.draft_result,
+            "draft_proposer": self.draft_proposer,
             "usage": self.usage.to_dict(),
             "finished_at": self.finished_at,
         }

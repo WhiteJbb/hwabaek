@@ -36,9 +36,11 @@ termination:
   # timeout_seconds는 voting 상태 전용 타이머(ApprovalConfig.voting_timeout) —
   # idle_timeout과는 분리된 별도 시계다(D-019). minimum_votes는
   # participating_unanimous 전용이며 그 외 mode에서는 null이어야 한다.
+  # timeout_seconds 기본 120 (D-025): 심의자가 진행 중 호출을 끝내고 다음 배치에서
+  # 초안을 검토·투표할 시간 — 너무 짧으면 기권 처리되어 unanimous에서 no_quorum 실패.
   approval:
     mode: unanimous
-    timeout_seconds: 30
+    timeout_seconds: 120
     minimum_votes: null
 
 # 팀을 구성하는 에이전트 목록. 각 에이전트는 name/role/system_prompt가 필수이며

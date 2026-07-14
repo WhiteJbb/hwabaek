@@ -26,6 +26,8 @@
 ### 3.1 `session_status` (`make_session_status_event`) — 세션 상태 전이 시 발행
 
 `result`/`submitted_by`는 담지 않는다 — 확정 결과는 `result` 이벤트로 별도 전달.
+실패 세션의 미승인 초안(`Session.draft_result`, D-025)도 payload에 싣지 않는다 —
+REST 세션 스냅샷 조회(M3)로 제공.
 
 | 필드 | 타입 | 의미 |
 |---|---|---|
@@ -52,7 +54,7 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | `type` | string | `MessageType`: `chat`\|`result_proposal`\|`vote`. |
 | `content` | string | 본문(`vote`는 투표 사유). |
 | `created_at` | string | 버스 시각. envelope `created_at`과 동일 값. |
-| `sequence` | int | 메시지의 세션 내 단조 증가 번호(D-023). envelope `sequence`와 동일 값. |
+| `sequence` | int | 메시지의 세션 내 단조 증가 번호(D-023) — **버스가 부여하며 메시지만 카운트**. envelope `sequence`(모든 이벤트 카운트)와는 **독립된 카운터**로, 일반적으로 값이 다르다 (D-025 정정). |
 | `vote` | string\|null | `VoteDecision`: `approve`\|`reject`. `chat`/`result_proposal`은 항상 `null`. |
 | `proposal_id` | string\|null | `vote`/`result_proposal` 필수(대상/자기 `ResultProposal.id` — 제안 버전 추적, D-016), `chat`은 항상 `null`. |
 
@@ -62,8 +64,11 @@ payload는 `Message.to_dict()`와 동일 스키마.
  "payload": {"id": "msg_0091", "session_id": "sess_8f3a1c", "sender": "analyst",
  "recipients": ["*"], "type": "result_proposal",
  "content": "Draft summary: quarterly revenue rose 8% YoY.",
- "created_at": "2026-07-14T09:15:23.500Z", "sequence": 13, "vote": null, "proposal_id": "prop_7"}}
+ "created_at": "2026-07-14T09:15:23.500Z", "sequence": 9, "vote": null, "proposal_id": "prop_7"}}
 ```
+
+(예시에서 envelope `sequence`=13, payload `sequence`=9 — 이벤트 카운터는 상태/사용량
+이벤트도 포함하므로 메시지 카운터보다 앞서 간다.)
 
 ### 3.3 `agent_state` (`make_agent_state_event`) — 에이전트 상태 변화 시 발행
 

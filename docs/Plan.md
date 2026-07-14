@@ -43,8 +43,9 @@
    append — 프롬프트 캐싱 전략(Research §2·§6)과 정합. 이력 상한(에이전트당 턴 수
    또는 추정 토큰) 도달 시 절단하되(M5 compaction 전 최소 방어선), **보존 우선순위**:
    시스템 프롬프트(절대 제거 금지) > 사용자 원본 태스크 > 제안·투표 관련 메시지
-   (결정 근거) > 최근 메시지 > 오래된 chat부터 절단. 절단 발생 사실은 명시적
-   메시지로 이력에 삽입한다.
+   (결정 근거) > 최근 메시지 > 오래된 chat부터 절단. 보호 대상 자체가 상한을
+   넘으면 **최신 제안 1개만 원문 보호**하고 과거 버전·투표는 한 줄 요약으로
+   대체한다(D-025). 절단 발생 사실은 명시적 메시지로 이력에 삽입한다.
 3. **세션 상태 기계**:
    ```
    running ──result_proposal──> voting ──정족수 승인──> completed
@@ -93,6 +94,11 @@
      반환하고 세션 상태는 SessionManager가 전환한다. reject 발생 시 반려 —
      사유가 제출자에게 전달되고 running 복귀. voting 중에도 메시지/토큰 예산은
      계속 강제.
+   - **미승인 초안 보존 (D-025)**: 투표까지 갔지만 확정 없이 실패한 세션
+     (no_quorum, voting 중 예산 초과 등)은 마지막 제안 content를
+     `Session.draft_result`(+`draft_proposer`)로 보존한다 — 사용자가 최소한
+     초안은 수령. no_quorum 실패 시 fail_detail에 **미투표/기권자 목록 기록 필수**
+     (실패 사유가 가장 뭉개지기 쉬운 경로).
 6. **종료 원자성 (D-021)**: 여러 종료 조건이 동시에 발생해도(마지막 투표 vs 예산
    초과, 취소 vs 승인 등) 종료는 **한 번만** 확정된다 — 세션 단위 lock으로 전환을
    직렬화하고 최초 유효 사유만 저장. 경합 우선순위:
@@ -158,7 +164,14 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
   도메인 이벤트 세분 taxonomy 확정(EventContract §8 후보 — 발행 지점과 함께).
 
 ### M2 — 코어 엔진 (서버 없이 동작)
-- `store/base.py` 계약 확정 후 `store/sqlite.py` 구현 (D-017): sessions / agents /
+
+두 단계로 나눠 진행한다 (D-025 — 통합 리스크 축소):
+- **M2a**: 인메모리 코어 — bus / consensus / session / agent + Fake LLM 통합 테스트
+  + CLI smoke. store 없이 완결 동작이 완료 기준.
+- **M2b**: `store/base.py` 계약 확정 → `store/sqlite.py` 접목 + 도메인 이벤트
+  taxonomy 확정(EventContract §8) + 실 API 스모크.
+
+- `store/base.py` 계약 확정 후 `store/sqlite.py` 구현 (D-017, M2b): sessions / agents /
   messages / proposals / votes / decisions / usage_events / session_events.
 - `bus.py`: asyncio 기반 인박스/브로드캐스트(발신자 제외), 세션 sequence 부여,
   중복 id 무시, 원자적 drain — 관측용 이벤트 훅.

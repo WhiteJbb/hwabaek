@@ -1489,6 +1489,56 @@ class TestSessionFailDetail(unittest.TestCase):
         self.assertEqual(e.payload["fail_detail"], "agent writer dead: provider outage")
 
 
+class TestSessionDraft(unittest.TestCase):
+    # 미승인 초안 보존 (D-025) — 투표까지 갔지만 확정되지 못한 실패 세션에서
+    # 마지막 제안 내용을 보존한다. FAILED에서만, draft_result/draft_proposer 동반 필수.
+    def test_failed_session_carries_draft_and_roundtrips(self) -> None:
+        s = _session(
+            status=SessionStatus.FAILED,
+            fail_reason=FailReason.NO_QUORUM,
+            fail_detail="voting timed out: pending voters analyst",
+            draft_result="Draft answer: use SQLite for persistence.",
+            draft_proposer="writer",
+            finished_at=TS2,
+        )
+        self.assertEqual(Session.from_dict(s.to_dict()), s)
+        d = s.to_dict()
+        self.assertEqual(d["draft_result"], "Draft answer: use SQLite for persistence.")
+        self.assertEqual(d["draft_proposer"], "writer")
+
+    def test_non_failed_rejects_draft(self) -> None:
+        with self.assertRaises(ContractError):
+            _session(draft_result="draft", draft_proposer="writer")
+        with self.assertRaises(ContractError):
+            _session(status=SessionStatus.COMPLETED, result="final",
+                     submitted_by="writer", draft_result="draft",
+                     draft_proposer="writer", finished_at=TS2)
+
+    def test_draft_fields_must_be_set_together(self) -> None:
+        with self.assertRaises(ContractError):
+            _session(status=SessionStatus.FAILED, fail_reason=FailReason.NO_QUORUM,
+                     draft_result="draft", finished_at=TS2)
+        with self.assertRaises(ContractError):
+            _session(status=SessionStatus.FAILED, fail_reason=FailReason.NO_QUORUM,
+                     draft_proposer="writer", finished_at=TS2)
+
+    def test_with_status_carries_draft(self) -> None:
+        s = _session().with_status(SessionStatus.VOTING).with_status(
+            SessionStatus.FAILED,
+            fail_reason=FailReason.NO_QUORUM,
+            draft_result="unratified draft content",
+            draft_proposer="writer",
+            finished_at=TS2,
+        )
+        self.assertEqual(s.draft_result, "unratified draft content")
+        self.assertEqual(s.draft_proposer, "writer")
+
+    def test_default_session_has_no_draft(self) -> None:
+        s = _session()
+        self.assertIsNone(s.draft_result)
+        self.assertIsNone(s.draft_proposer)
+
+
 class TestBoolRejection(unittest.TestCase):
     # bool은 int의 서브클래스지만 계약에서는 타입 오류로 거부한다.
     def test_usage_rejects_bool(self) -> None:

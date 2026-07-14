@@ -60,7 +60,7 @@ termination:             # 종료 정책 (전부 선택)
   idle_timeout: 30       # 전원 유휴 판정 시간(초) — running 전용
   approval:              # 화백 합의 설정 (문자열 축약형 `approval: unanimous`도 지원)
     mode: unanimous      # unanimous | majority | participating_unanimous | first
-    timeout_seconds: 30  # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
+    timeout_seconds: 120 # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
     minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
 agents:                  # 1명 이상
   - name: researcher     # 필수

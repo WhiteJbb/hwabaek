@@ -2,6 +2,26 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 설계 자체 검토 개선 4건 반영 (feat/m1-contracts, D-025)
+
+### 진행한 작업
+- 설계 동기화 결과를 자체 검토해 발견한 개선점 4건을 사용자 승인 후 반영:
+  1. `voting_timeout` 기본 30→120초 (계약·기본 팀 YAML·README) — 기본 unanimous
+     조합에서 "세션 맨 끝의 timeout-기권-no_quorum 실패" 양산 방지.
+  2. **미승인 초안 보존**: `Session.draft_result`/`draft_proposer` 신설(FAILED에서만,
+     동반 필수) — no_quorum·voting 중 예산 초과 실패에도 사용자가 초안 수령.
+     IA SC-03에 미승인 초안 카드 추가.
+  3. **EventContract 결함 정정**: message payload sequence(버스 카운터)와 envelope
+     sequence(이벤트 카운터)를 "동일 값"으로 서술한 오류 → 독립 카운터로 정정,
+     예시도 상이한 값으로 수정.
+  4. M2를 M2a(인메모리 코어)/M2b(store 접목)로 분할 + no_quorum 시 fail_detail
+     의무화 + 이력 보호 상한 규칙(최신 제안 1개만 원문 보호) — Plan 반영.
+- DecisionLog D-025 기록. 전체 테스트 249개(신규 5) 3회 반복 통과.
+
+### 오류/이슈
+- (자체 검토 발견) EventContract §3.2의 이중 sequence 동일성 서술 — M3 대시보드가
+  문서를 믿고 구현하면 어긋날 결함이었음. 위 3번으로 수정 완료.
+
 ## 2026-07-14 — 설계 동기화: 신규 설계를 문서·계약에 반영 (feat/m1-contracts, M1 PR에 포함)
 
 ### 진행한 작업

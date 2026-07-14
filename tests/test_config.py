@@ -79,7 +79,7 @@ agents:
         self.assertEqual(team.termination.token_budget, 12345)
         self.assertEqual(team.termination.idle_timeout, 5.5)
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.MAJORITY)
-        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertEqual(team.termination.approval.voting_timeout, 120.0)
         self.assertIsNone(team.termination.approval.minimum_votes)
         self.assertEqual(len(team.agents), 2)
         alpha, beta = team.agents
@@ -103,7 +103,7 @@ agents:
         self.assertEqual(team.termination.token_budget, 200_000)
         self.assertEqual(team.termination.idle_timeout, 30.0)
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
-        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertEqual(team.termination.approval.voting_timeout, 120.0)
         self.assertIsNone(team.termination.approval.minimum_votes)
         self.assertEqual(len(team.agents), 2)
         agent = team.agents[0]
@@ -125,7 +125,7 @@ agents:
 
         approval = team.termination.approval
         self.assertEqual(approval.mode, ApprovalPolicy.PARTICIPATING_UNANIMOUS)
-        self.assertEqual(approval.voting_timeout, 30.0)
+        self.assertEqual(approval.voting_timeout, 120.0)
         self.assertIsNone(approval.minimum_votes)
 
     def test_mapping_approval_loads_all_fields(self) -> None:
@@ -178,7 +178,7 @@ class DefaultTeamYamlTest(unittest.TestCase):
         agent_names = {agent.name for agent in team.agents}
         self.assertEqual(agent_names, {"researcher", "analyst", "writer"})
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
-        self.assertEqual(team.termination.approval.voting_timeout, 30.0)
+        self.assertEqual(team.termination.approval.voting_timeout, 120.0)
         self.assertIsNone(team.termination.approval.minimum_votes)
         self.assertEqual(team.termination.max_messages, 100)
         self.assertEqual(team.termination.token_budget, 200_000)
