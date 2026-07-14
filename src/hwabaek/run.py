@@ -108,14 +108,17 @@ def _fake_llm_factory(task: str):
     return factory
 
 
-def _real_llm_factory():
-    # OPENAI_API_KEY는 SDK가 읽는다 — 존재만 확인하고 값은 다루지 않는다(마스킹 원칙).
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("error: OPENAI_API_KEY is not set (required for real runs; use --fake for a hermetic smoke)")
-        raise SystemExit(2)
+def _real_llm_factory(auth_mode: str):
     from hwabaek.llm.openai_client import OpenAIClient
 
-    client = OpenAIClient()
+    if auth_mode == "api_key" and not os.environ.get("OPENAI_API_KEY"):
+        # 키 값은 다루지 않고 존재만 확인한다(마스킹 원칙).
+        print("error: OPENAI_API_KEY is not set (required for --auth api_key; "
+              "use --fake for a hermetic smoke)")
+        raise SystemExit(2)
+
+    # chatgpt_oauth: 토큰 없으면 LLMAuthError가 로그인 명령을 안내한다 (D-026).
+    client = OpenAIClient(auth_mode=auth_mode)
 
     def factory(spec: AgentSpec) -> OpenAIClient:
         return client  # 어댑터는 상태 없는 호출 래퍼 — 에이전트 간 공유 가능
@@ -129,7 +132,7 @@ async def _run(args: argparse.Namespace) -> int:
         llm_factory = _fake_llm_factory(args.task)
     else:
         team = load_team_config(args.team)
-        llm_factory = _real_llm_factory()
+        llm_factory = _real_llm_factory(args.auth)
 
     store = None
     if not args.no_db:
@@ -182,6 +185,11 @@ def main() -> None:
     parser.add_argument(
         "--fake", action="store_true",
         help="hermetic smoke run with a scripted fake LLM (no network, no key)",
+    )
+    parser.add_argument(
+        "--auth", choices=["api_key", "chatgpt_oauth"], default="api_key",
+        help="llm auth mode (D-026); chatgpt_oauth is experimental and needs "
+             "'python -m hwabaek.llm.chatgpt_auth login' first",
     )
     parser.add_argument(
         "--db", default="data/hwabaek.db",

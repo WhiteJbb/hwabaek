@@ -398,20 +398,40 @@ def _summary(label: str, exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 
 class OpenAIClient:
-    """OpenAI Responses API 기반 LLMClient 구현(api_key 모드, D-026).
+    """OpenAI Responses API 기반 LLMClient 구현 — 인증 모드 2종(D-026).
+
+    - api_key(기본·공식): OPENAI_API_KEY 또는 주입 키로 표준 API 호출.
+    - chatgpt_oauth(선택·비공식): ChatGPT 구독 device flow 토큰으로 구독 백엔드 호출.
+      구독 백엔드가 거부하는 필드는 payload에서 제거하고(build_request_payload),
+      토큰 예산은 사후 집계로만 강제한다.
 
     재시도는 SDK 기본(max_retries=2)에 맡기고 자체 재시도 루프는 두지 않는다.
     스트리밍은 쓰지 않고 완성된 응답 1건을 반환한다(계약 준수).
     """
 
-    def __init__(self, api_key: str | None = None, *, base_url: str | None = None) -> None:
-        # 인증 분기(D-026: api_key | chatgpt_oauth)가 나중에 끼워질 수 있게 클라이언트
-        # 구성은 _build_client 한 곳에 모은다. 지금은 api_key 모드만.
-        self._client = self._build_client(api_key=api_key, base_url=base_url)
+    def __init__(
+        self,
+        auth_mode: str = AUTH_API_KEY,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        token_provider: ChatGPTTokenProvider | None = None,
+    ) -> None:
+        # 인증 분기(D-026: api_key | chatgpt_oauth). 클라이언트 구성은 모드별 빌더
+        # 한 곳에 모으고, complete/매핑 경로는 auth_mode만 참조한다(핫패스 무분기).
+        self._auth_mode = auth_mode
+        if auth_mode == AUTH_CHATGPT_OAUTH:
+            self._client = self._build_chatgpt_client(
+                token_provider=token_provider, base_url=base_url
+            )
+        elif auth_mode == AUTH_API_KEY:
+            self._client = self._build_client(api_key=api_key, base_url=base_url)
+        else:
+            raise LLMAuthError(f"unknown auth_mode: {auth_mode!r}")
 
     @staticmethod
     def _build_client(*, api_key: str | None, base_url: str | None) -> Any:
-        """AsyncOpenAI 클라이언트를 구성한다.
+        """AsyncOpenAI 클라이언트를 구성한다(api_key 모드).
 
         api_key 미지정 시 SDK가 OPENAI_API_KEY 환경변수를 사용한다. base_url은 지정
         시에만 넘긴다. 키는 클라이언트 내부에만 두고 어디에도 노출하지 않는다.
@@ -423,6 +443,35 @@ class OpenAIClient:
             kwargs["base_url"] = base_url
         return openai.AsyncOpenAI(**kwargs)
 
+    @staticmethod
+    def _build_chatgpt_client(
+        *, token_provider: ChatGPTTokenProvider | None, base_url: str | None
+    ) -> Any:
+        """AsyncOpenAI 클라이언트를 구독(chatgpt_oauth) 백엔드용으로 구성한다.
+
+        토큰 프로바이더에서 유효 토큰·account_id를 받아(필요 시 refresh) Bearer 인증과
+        계정 헤더를 구성한다. base_url·헤더 구성은 litellm chatgpt 프로바이더 소스에서
+        확정했다. access_token은 SDK의 api_key로 전달돼 `Authorization: Bearer`로
+        나가며(로그·repr 미노출), account_id 등 부가 헤더는 default_headers로 싣는다.
+
+        주의(실측 필요): 토큰은 구성 시점에 1회 확보한다 — 세션 도중 만료 시 자동
+        재발급은 하지 않는다(다음 세션에서 refresh). 구독 백엔드의 stream 강제·
+        accept 헤더 요구는 실 로그인으로 검증해야 한다(README 고지).
+        """
+        provider = token_provider or ChatGPTTokenProvider()
+        access_token, account_id = provider.get_auth()
+        headers = {
+            "originator": DEFAULT_ORIGINATOR,
+            "user-agent": DEFAULT_USER_AGENT,
+        }
+        if account_id:
+            headers[CHATGPT_ACCOUNT_ID_HEADER] = account_id
+        return openai.AsyncOpenAI(
+            api_key=access_token,
+            base_url=base_url or CHATGPT_API_BASE,
+            default_headers=headers,
+        )
+
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """요청 1건을 수행하고 정규화된 응답을 반환한다.
 
@@ -430,7 +479,7 @@ class OpenAIClient:
         raise하며, 원본 예외를 체이닝하지 않는다(`from None`) — 원본 메시지에 섞일 수
         있는 API 키가 트레이스백에 노출되지 않게 한다.
         """
-        payload = build_request_payload(request)
+        payload = build_request_payload(request, auth_mode=self._auth_mode)
         try:
             raw = await self._client.responses.create(**payload)
         except openai.OpenAIError as exc:
