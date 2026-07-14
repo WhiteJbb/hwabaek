@@ -10,6 +10,7 @@ description = "Multi-agent orchestration via autonomous message passing and cons
 requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
+    "openai>=2.45",
 ]
 
 [tool.setuptools.packages.find]

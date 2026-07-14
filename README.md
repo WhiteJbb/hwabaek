@@ -63,12 +63,19 @@ termination:             # 종료 정책 (전부 선택)
     timeout_seconds: 120 # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
     minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
 agents:                  # 1명 이상
-  - name: researcher     # 필수
+  - name: sangdaedeung   # 필수
     role: ...            # 필수 — 대시보드 표시용
     system_prompt: ...   # 필수
     model: ...           # 선택 — 에이전트별 오버라이드
     max_turns: 50        # 선택 — 에이전트당 LLM 호출 상한
+    capabilities:        # 선택 — 생략 시 전체. 런타임이 권한 밖 호출을 거부 (D-027)
+      - send_message     #   send_message | submit_result | vote_result
+      - submit_result
 ```
+
+기본 팀은 화백 컨셉의 **대등 3인 구조**입니다 — 조사 대등(research_daedeung),
+견제 대등(critic_daedeung), 상대등(sangdaedeung, 진행·종합·제출). 상대등이 제출한
+안을 나머지 두 대등이 모두 승인해야 의결됩니다.
 
 허용되지 않은 키는 오타로 간주해 로드 시 즉시 거부됩니다(파일·필드 경로를 포함한
 오류 메시지). 대시보드가 구독하는 이벤트 스트림 계약은
@@ -80,7 +87,8 @@ agents:                  # 1명 이상
 |---|---|---|
 | M0 | 방향 결정, 기술 조사, 문서/계획 수립 | ✅ 완료 |
 | M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
-| M2 | 코어 엔진 (메시지 버스, 에이전트 루프, 종료 정책) | 예정 |
+| M2a | 코어 엔진 (버스/에이전트 루프/합의/종료 정책, 인메모리) | ✅ 완료 |
+| M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | 예정 |
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
 | M5 | 견고화 (실패 경로, E2E) | 예정 |
@@ -96,6 +104,19 @@ agents:                  # 1명 이상
 - LLM 클라이언트는 프로바이더 중립 계약으로 추상화 — Anthropic 어댑터는 후순위
   ([docs/DecisionLog.md](docs/DecisionLog.md) D-008/D-009)
 - FastAPI + uvicorn, SSE
+
+## 실행 (콘솔 스모크, M2a)
+
+```
+# 밀폐 스모크 — 실키/네트워크 없이 전체 스택 확인
+.venv\Scripts\python.exe -m hwabaek.run "your task" --fake
+
+# 실제 실행 — OPENAI_API_KEY 필요 (기본 팀: configs/team.default.yaml)
+.venv\Scripts\python.exe -m hwabaek.run "your task"
+```
+
+세션 이벤트가 콘솔에 실시간 출력되고, 종료 시 상태·결과(또는 미승인 초안)·토큰
+사용량이 표시됩니다. 웹 대시보드는 M4에서 제공됩니다.
 
 ## 개발 환경 (Windows)
 

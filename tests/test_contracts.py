@@ -1617,5 +1617,107 @@ class TestValidateVote(unittest.TestCase):
             validate_vote(vote, proposal)
 
 
+# ---------------------------------------------------------------------------
+# AgentCapability / AgentSpec.capabilities / TeamConfig 권한 검증 (D-027)
+# 런타임(SessionManager)이 프롬프트가 아니라 이 권한 목록으로 도구 호출을 강제한다.
+# ---------------------------------------------------------------------------
+
+from hwabaek.contracts import ALL_CAPABILITIES, AgentCapability
+
+
+class TestAgentCapability(unittest.TestCase):
+    def test_values_match_command_constants(self) -> None:
+        # 권한 값은 명령 이름과 동일해야 한다(런타임이 이 값으로 호출을 대조).
+        self.assertEqual(AgentCapability.SEND_MESSAGE.value, COMMAND_SEND_MESSAGE)
+        self.assertEqual(AgentCapability.SUBMIT_RESULT.value, COMMAND_SUBMIT_RESULT)
+        self.assertEqual(AgentCapability.VOTE_RESULT.value, COMMAND_VOTE_RESULT)
+
+    def test_all_capabilities_is_full_set(self) -> None:
+        # ALL_CAPABILITIES는 3종 전체를 담은 frozenset.
+        self.assertIsInstance(ALL_CAPABILITIES, frozenset)
+        self.assertEqual(ALL_CAPABILITIES, frozenset(AgentCapability))
+        self.assertEqual(len(ALL_CAPABILITIES), 3)
+        self.assertEqual(
+            {c.value for c in ALL_CAPABILITIES},
+            {COMMAND_SEND_MESSAGE, COMMAND_SUBMIT_RESULT, COMMAND_VOTE_RESULT},
+        )
+
+
+class TestAgentSpecCapabilities(unittest.TestCase):
+    # capabilities는 frozenset[AgentCapability] — 생략 시 전체 권한, 빈 집합 허용.
+    def test_default_is_all_capabilities(self) -> None:
+        self.assertEqual(_agent().capabilities, ALL_CAPABILITIES)
+
+    def test_explicit_frozenset_preserved(self) -> None:
+        # 명시한 frozenset은 그대로 보존된다.
+        caps = frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT})
+        self.assertEqual(_agent(capabilities=caps).capabilities, caps)
+
+    def test_rejects_non_frozenset(self) -> None:
+        # frozenset이 아닌 타입(list/set 등)은 거부 — 불변 집합만 허용.
+        for bad in ([AgentCapability.SEND_MESSAGE], {AgentCapability.SEND_MESSAGE}):
+            with self.subTest(kind=type(bad).__name__):
+                with self.assertRaises(ContractError):
+                    _agent(capabilities=bad)
+
+    def test_rejects_string_members(self) -> None:
+        # 원소가 문자열(명령 이름)인 frozenset은 거부 — AgentCapability 인스턴스만 허용.
+        with self.assertRaises(ContractError):
+            _agent(capabilities=frozenset({"send_message"}))
+
+    def test_empty_frozenset_allowed(self) -> None:
+        # 빈 권한(관찰 전용 에이전트 — 어떤 도구도 호출 불가)도 허용된다.
+        spec = _agent(capabilities=frozenset())
+        self.assertEqual(spec.capabilities, frozenset())
+
+
+class TestTeamConfigCapabilities(unittest.TestCase):
+    # D-027 권한 정합성: 제출 가능 에이전트 최소 1명, 투표 모드에서는 각 제출자마다
+    # 자기 제안을 심의할 수 있는(다른, vote_result 보유) 에이전트가 1명 이상 필요.
+    _SUBMIT_ONLY = frozenset({AgentCapability.SUBMIT_RESULT})
+    _SEND_VOTE = frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT})
+    _SEND_ONLY = frozenset({AgentCapability.SEND_MESSAGE})
+
+    def test_rejects_no_submitter(self) -> None:
+        # 제출 가능 에이전트 0명 → 거부(오류 메시지에 submit_result 언급).
+        with self.assertRaises(ContractError) as ctx:
+            _team(agents=(
+                _agent(name="analyst", capabilities=self._SEND_VOTE),
+                _agent(name="reviewer", capabilities=self._SEND_VOTE),
+            ))
+        self.assertIn("submit_result", str(ctx.exception))
+
+    def test_rejects_submitter_without_eligible_voter(self) -> None:
+        # unanimous(기본): 제출자 writer 외에 vote_result 보유자가 없으면 거부
+        # (제출자 이름을 오류 메시지에 포함).
+        with self.assertRaises(ContractError) as ctx:
+            _team(agents=(
+                _agent(name="writer", capabilities=self._SUBMIT_ONLY),
+                _agent(name="helper", capabilities=self._SEND_ONLY),
+            ))
+        self.assertIn("writer", str(ctx.exception))
+
+    def test_first_mode_allows_no_voter(self) -> None:
+        # first 모드는 투표를 생략하므로 심의 가능 에이전트가 없어도 허용된다.
+        cfg = TerminationPolicy(approval=ApprovalConfig(mode=ApprovalPolicy.FIRST))
+        t = _team(
+            agents=(
+                _agent(name="writer", capabilities=self._SUBMIT_ONLY),
+                _agent(name="helper", capabilities=self._SEND_ONLY),
+            ),
+            termination=cfg,
+        )
+        self.assertEqual(len(t.agents), 2)
+
+    def test_valid_proposal_team_shape(self) -> None:
+        # 제안 팀 형태: 제출 전용 1 + 투표 가능 2 → unanimous 기본에서 통과.
+        t = _team(agents=(
+            _agent(name="proposer", capabilities=self._SUBMIT_ONLY),
+            _agent(name="voter1", capabilities=self._SEND_VOTE),
+            _agent(name="voter2", capabilities=self._SEND_VOTE),
+        ))
+        self.assertEqual(len(t.agents), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

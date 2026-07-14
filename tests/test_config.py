@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from hwabaek.config import ConfigError, list_team_configs, load_team_config
-from hwabaek.contracts import DEFAULT_MODEL, ApprovalPolicy, ContractError
+from hwabaek.contracts import DEFAULT_MODEL, AgentCapability, ApprovalPolicy, ContractError
 
 # 저장소 루트 (tests/ 의 부모).
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,8 @@ def _write(directory: Path, filename: str, content: str) -> Path:
 # 최소 에이전트 블록 — 2인 팀. approval mode가 first가 아닌 한 최소 2인이
 # 필요하다(D-018: 제출자는 자기 제안에 투표할 수 없음)는 계약 요건 때문에,
 # 여러 케이스에서 재사용하는 이 최소 블록도 2인으로 구성한다.
+# capabilities를 생략했으므로 두 에이전트 모두 계약 기본값(전체 권한)을 쓴다 —
+# 따라서 D-027의 제출자/투표자 검증도 항상 통과한다.
 MINIMAL_AGENT_BLOCK = """
 agents:
   - name: solo
@@ -163,9 +165,103 @@ agents:
         self.assertEqual(len(team.agents), 1)
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.FIRST)
 
+    def test_capabilities_omitted_grants_full_permissions(self) -> None:
+        # capabilities 생략 시 계약 기본값(ALL_CAPABILITIES = 전체 권한)을 그대로 쓴다.
+        content = "name: minimal-team\n" + MINIMAL_AGENT_BLOCK
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        for agent in team.agents:
+            self.assertEqual(agent.capabilities, frozenset(AgentCapability))
+
+    def test_capabilities_valid_list_is_parsed_into_frozenset(self) -> None:
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent. respond in the language of the task.
+    capabilities:
+      - send_message
+      - submit_result
+      - vote_result
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant. respond in the language of the task.
+    capabilities:
+      - send_message
+      - vote_result
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        solo, helper = team.agents
+        self.assertEqual(solo.capabilities, frozenset(AgentCapability))
+        self.assertEqual(
+            helper.capabilities,
+            frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT}),
+        )
+
+    def test_capabilities_duplicate_values_are_deduplicated(self) -> None:
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent. respond in the language of the task.
+    capabilities:
+      - send_message
+      - submit_result
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant. respond in the language of the task.
+    capabilities:
+      - vote_result
+      - vote_result
+      - send_message
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        helper = team.agents[1]
+        self.assertEqual(
+            helper.capabilities,
+            frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT}),
+        )
+
+    def test_capabilities_empty_list_is_allowed_as_observer(self) -> None:
+        # 빈 리스트는 허용 — 어떤 도구도 호출할 수 없는 관찰자 에이전트.
+        # approval: first를 써서(투표 없음) 투표 가능 심의자 요건을 피한다.
+        content = """
+name: t
+termination:
+  approval: first
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent. respond in the language of the task.
+    capabilities:
+      - send_message
+      - submit_result
+      - vote_result
+  - name: observer
+    role: watches only
+    system_prompt: You only observe. respond in the language of the task.
+    capabilities: []
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            team = load_team_config(path)
+
+        observer = team.agents[1]
+        self.assertEqual(observer.capabilities, frozenset())
+
 
 class DefaultTeamYamlTest(unittest.TestCase):
-    """configs/team.default.yaml 실제 파일 검증."""
+    """configs/team.default.yaml 실제 파일 검증 (D-027 — 조사/견제/상대등 3인 구조)."""
 
     def test_default_team_yaml_has_three_agents_and_unanimous_approval(self) -> None:
         self.assertTrue(
@@ -176,13 +272,35 @@ class DefaultTeamYamlTest(unittest.TestCase):
         self.assertEqual(team.name, "default")
         self.assertEqual(len(team.agents), 3)
         agent_names = {agent.name for agent in team.agents}
-        self.assertEqual(agent_names, {"researcher", "analyst", "writer"})
+        self.assertEqual(
+            agent_names, {"research_daedeung", "critic_daedeung", "sangdaedeung"}
+        )
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
         self.assertEqual(team.termination.approval.voting_timeout, 120.0)
         self.assertIsNone(team.termination.approval.minimum_votes)
-        self.assertEqual(team.termination.max_messages, 100)
-        self.assertEqual(team.termination.token_budget, 200_000)
-        self.assertEqual(team.termination.idle_timeout, 30.0)
+        self.assertEqual(team.termination.max_messages, 60)
+        self.assertEqual(team.termination.token_budget, 100_000)
+        self.assertEqual(team.termination.idle_timeout, 45.0)
+
+    def test_default_team_yaml_agent_capabilities_and_max_turns(self) -> None:
+        team = load_team_config(DEFAULT_TEAM_YAML)
+        by_name = {agent.name: agent for agent in team.agents}
+
+        self.assertEqual(
+            by_name["research_daedeung"].capabilities,
+            frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT}),
+        )
+        self.assertEqual(
+            by_name["critic_daedeung"].capabilities,
+            frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.VOTE_RESULT}),
+        )
+        self.assertEqual(
+            by_name["sangdaedeung"].capabilities,
+            frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.SUBMIT_RESULT}),
+        )
+        self.assertEqual(by_name["research_daedeung"].max_turns, 15)
+        self.assertEqual(by_name["critic_daedeung"].max_turns, 15)
+        self.assertEqual(by_name["sangdaedeung"].max_turns, 18)
 
 
 class LoadTeamConfigErrorCasesTest(unittest.TestCase):
@@ -466,6 +584,106 @@ agents:
             with self.assertRaises(ConfigError) as ctx:
                 load_team_config(path)
             self.assertIn(str(path), str(ctx.exception))
+            self.assertIsInstance(ctx.exception.__cause__, ContractError)
+
+    def test_capabilities_invalid_value_lists_valid_options(self) -> None:
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent.
+    capabilities:
+      - send_message
+      - bogus_capability
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn("bogus_capability", message)
+            self.assertIn("agents[0]", message)
+            self.assertIn("capabilities", message)
+            for valid in ("send_message", "submit_result", "vote_result"):
+                self.assertIn(valid, message)
+
+    def test_capabilities_string_type_is_rejected(self) -> None:
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent.
+    capabilities: send_message
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn("agents[0]", message)
+            self.assertIn("capabilities", message)
+
+    def test_no_submit_capable_agent_wraps_contract_error(self) -> None:
+        # 결과를 제출할 수 있는 에이전트가 없으면 계약이 거부한다 (D-027).
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent.
+    capabilities:
+      - send_message
+      - vote_result
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant.
+    capabilities:
+      - send_message
+      - vote_result
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn(str(path), message)
+            self.assertIn("submit_result", message)
+            self.assertIsInstance(ctx.exception.__cause__, ContractError)
+
+    def test_unanimous_submitter_without_other_voter_wraps_contract_error(self) -> None:
+        # unanimous(기본 approval)에서는 제출자마다 투표 가능한 다른 심의자가
+        # 최소 1명 있어야 한다 (D-027) — helper는 vote_result 권한이 없다.
+        content = """
+name: t
+agents:
+  - name: solo
+    role: does everything
+    system_prompt: You are a helpful agent.
+    capabilities:
+      - send_message
+      - submit_result
+  - name: helper
+    role: assists solo
+    system_prompt: You are a helpful assistant.
+    capabilities:
+      - send_message
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            message = str(ctx.exception)
+            self.assertIn(str(path), message)
+            self.assertIn("solo", message)
+            self.assertIn("vote_result", message)
             self.assertIsInstance(ctx.exception.__cause__, ContractError)
 
 

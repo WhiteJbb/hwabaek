@@ -2,6 +2,53 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — 기본 팀 확정(대등 3인) + capabilities 도구 권한 (feat/m2a-core, D-027)
+
+### 진행한 작업
+- 사용자 최종안 채택: 기본 팀을 **research_daedeung / critic_daedeung /
+  sangdaedeung** 3인 구조로 교체 (첫 턴 행동 강제, 반대를 위한 반대 방지,
+  투표·메시지 구분 프롬프트 포함). 제한: 60msg/100k tokens/idle 45s/voting 120s.
+- **capabilities 계약 신설** (직접 작성): `AgentCapability` 3종 + `AgentSpec.
+  capabilities`(기본 전체 권한) + TeamConfig 검증 2건(제출 가능 에이전트 필수,
+  비-first 모드에서 각 제출자마다 다른 투표 가능 에이전트 필요). SessionManager
+  `_guard`에 권한 축 추가(상태 축과 이중 검증), **심의자 스냅샷 자격 = 생존 ∧
+  vote_result 권한**으로 갱신 — 검토에서 발견한 스냅샷-권한 상호작용 버그
+  (투표 불가 심의자 → unanimous 상시 no_quorum) 사전 차단.
+- 사용자 제안에서 3건 조정(D-027에 근거 기록): 기본값 전체 권한(하위 호환),
+  ToolError 재사용, (str, Enum) 관례 유지.
+- 병렬 위임: 로더 capabilities 파싱 + 기본 팀 검증(sonnet, 테스트 39개),
+  계약·통합 capability 테스트(opus, +13개 — 권한 밖 submit 거부, 스냅샷 제외).
+- 전체 테스트 **377개, 3회 반복 통과** + --fake 스모크 + 기본 팀 로드 확인.
+
+## 2026-07-14 — M2a 코어 엔진 구현 (feat/m2a-core)
+
+### 진행한 작업
+- **인터페이스 우선**: bus.py/consensus.py의 시그니처·독스트링(모듈 계약)을 직접
+  확정해 선 커밋 → 병렬 구현의 드리프트 방지.
+- **병렬 위임 (opus ×4)**: MessageBus(테스트 19 — 실패 post의 시퀀스 미소비,
+  원자 drain, wake 동기화), ConsensusEngine(26 — supersede 관측용 last_superseded
+  프로퍼티 추가), OpenAI 어댑터(23 — SDK 타입에서 명시적 캐시 breakpoint 확인·적용,
+  usage 비중첩 분해, 오류 정규화 시 원문 미포함으로 키 유출 차단, 절단된 tool call
+  파싱 크래시 발견·수정), 세션 통합 테스트(13 시나리오 — 실패 경로 전체 + 타이머
+  레이스 + 취소 후 호출 금지 + 종료 후 명령 감사 기록).
+- **조립 계층 직접 구현**: agent.py(도구 3종 스키마, 배치 병합, 이력 절단, 구조화
+  tool error), session.py(SessionManager — 단일 코디네이터 종료 직렬화, 타이머 2종
+  단일 감시, 판정-전환 분리, no_quorum fail_detail 의무, 미승인 초안 보존),
+  run.py(CLI — --fake 밀폐 스모크 / 실 API는 OPENAI_API_KEY).
+- 설계 조정 2건: vote_result 도구의 proposal_id를 생략 가능(활성 제안 해석 —
+  Vote 레코드에는 항상 실제 id)으로 완화, 제안 시점 즉시 판정(first APPROVED /
+  심의자 0명 NO_QUORUM)을 _apply_outcome으로 일원화(리뷰에서 발견한 엣지).
+- CLI --fake 전체 스택 관통 스모크 성공. 전체 테스트 **355개, 3회 반복 통과**.
+
+### 오류/이슈 (수정 완료)
+- (어댑터) 절단된 function_call의 인자 JSON을 즉시 파싱해 크래시 — TOOL_USE 확정
+  후로 파싱을 미뤄 해결 (테스트가 발견).
+- (세션) 심의자 0명 제안이 voting_timeout까지 불필요 대기 — 즉시 no_quorum 처리.
+
+### 남은 것 (M2b)
+- store/sqlite.py 접목, chatgpt_oauth 인증 모드, 도메인 이벤트 taxonomy 확정,
+  **실 API 스모크** (Fake만으로 M2 완료 처리 금지 — 체크리스트 원칙).
+
 ## 2026-07-14 — M2a 착수 전 스파이크: 모델 ID 확정 + subscription 연동 검증
 
 ### 진행한 작업

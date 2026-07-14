@@ -330,6 +330,37 @@
   시 즉시 제거될 수 있음을 README에 고지.
 - **결정자**: 사용자.
 
+## D-027 (2026-07-14) 기본 팀 확정: 대등 3인 구조 + capabilities 도구 권한
+
+- **상태**: 채택.
+- **맥락**: M1부터 미결이던 기본 팀 구성(초안: researcher/analyst/writer)에 대해
+  사용자가 화백 정체성에 맞는 최종안을 제시 — "조사 대등 → 견제 대등 → 상대등"
+  3인 구조 + 에이전트별 도구 권한(capabilities) 계약화.
+- **결정**:
+  1. 기본 팀 = `research_daedeung`(조사, send+vote) / `critic_daedeung`(견제,
+     send+vote) / `sangdaedeung`(진행·종합·제출, send+submit — **자기 제안에 투표
+     불가이므로 vote 권한 없음이 구조적으로 자연스러움**). 제한:
+     max_messages 60 / token_budget 100k / idle 45s / voting 120s, unanimous.
+  2. **`AgentCapability` 계약 신설** — 프롬프트가 아니라 런타임(SessionManager)이
+     권한 밖 도구 호출을 구조화된 tool error로 거부한다. 상태별 허용
+     (ALLOWED_COMMANDS)과 직교하는 축.
+  3. 프롬프트 설계 원칙 채택: 첫 턴 행동 강제(상호 대기 idle 방지), 반대를 위한
+     반대 금지(실질 결함만 반려 + 사유는 수정 가능한 형태), 일반 메시지와
+     result_proposal 투표의 명확한 구분.
+- **사용자 제안에서 조정한 것** (Claude 검토, 사용자 안대로 반영하되 3건 수정):
+  (a) capabilities 기본값을 "send_message만"이 아니라 **전체 권한**으로 — 기존
+  팀·테스트 하위 호환, 제한은 명시적 선택. (b) **심의자 스냅샷 자격 = 생존 ∧
+  vote_result 권한** — 이 규칙이 없으면 투표 불가 에이전트가 심의자로 들어가
+  unanimous가 항상 no_quorum이 됨(제안에 없던 상호작용 버그를 사전 차단). 팀
+  검증에 "각 제출 가능 에이전트마다 다른 투표 가능 에이전트 1명 이상" 추가.
+  (c) ToolPermissionError 신설 대신 기존 ToolError, StrEnum 대신 기존 (str, Enum)
+  관례.
+- **대안**: 프롬프트로만 권한 통제 — LLM이 지시를 어기면 화백 구조가 깨짐.
+- **결과와 트레이드오프**: 팀 구성 표현력이 늘고 역할 강제가 구조화됨. 파생 팀
+  (code-review/knowledge/career 등)은 설정 추가만으로 가능(D-004). 관찰 전용
+  (빈 capabilities) 에이전트도 계약상 허용.
+- **결정자**: 사용자 (구조·프롬프트), Claude (계약 통합 방식).
+
 ## D-012 (2026-07-14) 대시보드 접근: localhost 전용
 
 - **결정**: 서버는 `127.0.0.1`에만 바인딩하고 인증은 두지 않는다.

@@ -85,6 +85,22 @@ def allowed_commands(status: SessionStatus) -> frozenset[str]:
     return ALLOWED_COMMANDS[status]
 
 
+class AgentCapability(str, enum.Enum):
+    """에이전트별 도구 권한 (D-027) — 상태별 허용(ALLOWED_COMMANDS)과 직교하는 축.
+
+    런타임(SessionManager)이 프롬프트가 아니라 이 목록으로 도구 호출을 강제한다 —
+    권한 밖 호출은 구조화된 tool error로 거부된다. 값은 명령 이름과 동일하다.
+    """
+
+    SEND_MESSAGE = COMMAND_SEND_MESSAGE
+    SUBMIT_RESULT = COMMAND_SUBMIT_RESULT
+    VOTE_RESULT = COMMAND_VOTE_RESULT
+
+
+# 기본값: 전체 권한 — 제한은 팀 설정에서 명시적으로 선택한다 (하위 호환, D-027).
+ALL_CAPABILITIES: frozenset[AgentCapability] = frozenset(AgentCapability)
+
+
 class FailReason(str, enum.Enum):
     BUDGET = "budget"            # 토큰 예산 초과
     MESSAGES = "messages"        # 메시지 수 상한 초과
@@ -299,15 +315,27 @@ class Message:
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """팀을 구성하는 에이전트 1개의 명세. 팀 설정 YAML에서 로드된다."""
+    """팀을 구성하는 에이전트 1개의 명세. 팀 설정 YAML에서 로드된다.
+
+    capabilities는 도구 권한(D-027) — 생략 시 전체 권한. 빈 집합도 허용된다
+    (관찰만 하는 에이전트 — 어떤 도구도 호출할 수 없다).
+    """
 
     name: str
     role: str
     system_prompt: str
     model: str | None = None  # None이면 TeamConfig.default_model 사용
     max_turns: int = 50       # 에이전트당 LLM 호출 상한 (세션 예산과 별개의 방어선)
+    capabilities: frozenset[AgentCapability] = ALL_CAPABILITIES
 
     def __post_init__(self) -> None:
+        if not isinstance(self.capabilities, frozenset) or not all(
+            isinstance(c, AgentCapability) for c in self.capabilities
+        ):
+            raise ContractError(
+                f"agent {self.name!r}: capabilities must be a frozenset of "
+                "AgentCapability values"
+            )
         if not AGENT_NAME_RE.match(self.name):
             raise ContractError(
                 f"agent name {self.name!r} is invalid: use lowercase letters, digits,"
@@ -420,6 +448,29 @@ class TeamConfig:
                 f"approval mode {self.termination.approval.mode.value!r} requires at "
                 "least 2 agents (the proposer cannot vote on its own proposal)"
             )
+        # 권한 정합성 (D-027): 결과를 제출할 수 있는 에이전트가 없으면 세션은
+        # idle 실패로만 끝난다. 투표 모드에서는 각 제출 가능 에이전트마다 그 제안을
+        # 심의할 수 있는(다른, vote_result 권한 보유) 에이전트가 1명 이상 있어야 한다.
+        submitters = [
+            agent for agent in self.agents
+            if AgentCapability.SUBMIT_RESULT in agent.capabilities
+        ]
+        if not submitters:
+            raise ContractError(
+                "team needs at least one agent with submit_result capability"
+            )
+        if self.termination.approval.mode is not ApprovalPolicy.FIRST:
+            for submitter in submitters:
+                eligible = [
+                    agent for agent in self.agents
+                    if agent.name != submitter.name
+                    and AgentCapability.VOTE_RESULT in agent.capabilities
+                ]
+                if not eligible:
+                    raise ContractError(
+                        f"agent {submitter.name!r} could never pass a proposal: no "
+                        "other agent has vote_result capability"
+                    )
 
     def model_for(self, agent_name: str) -> str:
         """에이전트의 실효 모델 — 개별 지정이 없으면 팀 기본값."""

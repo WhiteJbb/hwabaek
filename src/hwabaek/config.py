@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from hwabaek.contracts import (
+    AgentCapability,
     AgentSpec,
     ApprovalConfig,
     ApprovalPolicy,
@@ -31,7 +32,7 @@ from hwabaek.contracts import (
 # 스키마에서 허용하는 키 집합 — 여기 없는 키는 오타로 간주해 거부한다.
 _TOP_LEVEL_KEYS = {"name", "description", "default_model", "termination", "agents"}
 _TERMINATION_KEYS = {"max_messages", "token_budget", "idle_timeout", "approval"}
-_AGENT_KEYS = {"name", "role", "system_prompt", "model", "max_turns"}
+_AGENT_KEYS = {"name", "role", "system_prompt", "model", "max_turns", "capabilities"}
 _APPROVAL_KEYS = {"mode", "timeout_seconds", "minimum_votes"}
 
 
@@ -245,6 +246,37 @@ def _parse_termination(
         raise ConfigError(f"team config {file_path}: {prefix}: {e}") from e
 
 
+def _parse_capabilities(
+    data: dict[str, Any], *, file_path: Path, prefix: str
+) -> frozenset[AgentCapability] | None:
+    """agent capabilities 필드를 파싱한다.
+
+    생략 시 None을 반환해(kwargs에서 제외) 계약 기본값(전체 권한)을 쓰게 한다.
+    지정 시 문자열 리스트여야 한다 — 빈 리스트는 허용(어떤 도구도 못 쓰는
+    관찰자 에이전트). 각 값은 AgentCapability로 변환하며 중복은 집합화로
+    무시한다. 유효하지 않은 값은 3종 유효 값을 나열해 거부한다.
+    """
+    if "capabilities" not in data:
+        return None
+    value = data["capabilities"]
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(
+            f"team config {file_path}: {prefix}.capabilities: expected a list of "
+            f"strings, got {value!r}"
+        )
+    capabilities: set[AgentCapability] = set()
+    for raw in value:
+        try:
+            capabilities.add(AgentCapability(raw))
+        except ValueError:
+            valid = ", ".join(c.value for c in AgentCapability)
+            raise ConfigError(
+                f"team config {file_path}: {prefix}.capabilities: invalid value "
+                f"{raw!r}, expected one of: {valid}"
+            ) from None
+    return frozenset(capabilities)
+
+
 def _parse_agent(data: Any, *, file_path: Path, index: int) -> AgentSpec:
     """agents 리스트의 항목 하나(에이전트 명세)를 파싱한다."""
     prefix = f"agents[{index}]"
@@ -270,9 +302,12 @@ def _parse_agent(data: Any, *, file_path: Path, index: int) -> AgentSpec:
     max_turns = _optional_int(
         data, "max_turns", file_path=file_path, prefix=prefix, default=None
     )
+    capabilities = _parse_capabilities(data, file_path=file_path, prefix=prefix)
     extra_kwargs: dict[str, Any] = {}
     if max_turns is not None:
         extra_kwargs["max_turns"] = max_turns
+    if capabilities is not None:
+        extra_kwargs["capabilities"] = capabilities
 
     try:
         return AgentSpec(

@@ -148,7 +148,7 @@ payload는 `Message.to_dict()`와 동일 스키마.
 |---|---|---|
 | 세션 생성(초기 `running`) | `session_status` | 초기 sequence 부여는 서버(M3) 구현 사항. |
 | `send_message` chat 발신 | `message` | |
-| `submit_result` 호출 (running에서만) | `message`(`result_proposal`) + `session_status`(`voting`) | `running→voting`. 반려 후 재제출은 version이 오른 새 제안(D-016). voting 중 중복 submit은 거부되어 이벤트 없음. |
+| `submit_result` 호출 (running에서만) | `message`(`result_proposal`) + `session_status`(`voting`) + `vote_status`(빈 집계 초기 스냅샷) | `running→voting`. 반려 후 재제출은 version이 오른 새 제안(D-016). voting 중 중복 submit은 거부되어 이벤트 없음. |
 | `vote_result` 호출 | `message`(`vote`) + `vote_status` | 투표는 브로드캐스트 메시지로도 남음(화백 원칙). 이전 제안에 대한 늦은 투표는 무시되어 `vote_status` 미발행. |
 | 무응답 기권 처리 (`voting_timeout` 만료) | `vote_status` | 메시지 이벤트 없음 — 엔진 내부 처리. `voting_timeout`은 `idle_timeout`과 분리된 voting 전용 타이머다(D-019). |
 | 합의 승인 | `vote_status`(최종) + `session_status`(`completed`) + `result` | `voting→completed`. |
