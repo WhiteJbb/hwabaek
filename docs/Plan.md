@@ -89,7 +89,7 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 ### M0 — 프로젝트 초기화 (완료: 2026-07-14)
 - 필수 문서 세트 생성, 방향 결정 확정.
 
-### M1 — 계약 확정 (계약 우선 원칙)
+### M1 — 계약 확정 (계약 우선 원칙) (완료: 2026-07-14)
 - `contracts.py`: `Message`(id/session_id/sender/recipients/**type: chat|result_proposal|vote**/content/created_at),
   `AgentSpec`(name/role/system_prompt/model/max_turns),
   `TeamConfig`(agents/termination: max_messages/token_budget/idle_timeout/**approval**),
@@ -98,8 +98,10 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 - `llm/base.py`: LLM 클라이언트 계약(프로바이더 중립 Protocol) 확정 — 요청/응답/사용량/
   도구 호출 표현을 프로바이더 특이사항 없이 정의 (D-009).
 - 팀 설정 YAML 스키마 확정 + 로더 + 검증 오류 메시지.
-- SSE 이벤트 계약(대시보드가 구독할 이벤트 타입 목록) 문서화.
+- SSE 이벤트 계약(대시보드가 구독할 이벤트 타입 목록) 문서화 → `docs/EventContract.md`.
 - **완료 기준**: 스키마 단위 테스트 통과. 이후 모듈은 이 계약 위에서 병렬 구현 가능.
+- 완료 내역: contracts.py + llm/base.py + llm/fake.py(테스트 대역) + config.py 로더 +
+  configs/team.default.yaml(기본 팀 초안) + EventContract.md, 단위 테스트 167개 통과.
 
 ### M2 — 코어 엔진 (서버 없이 동작)
 - `bus.py`: asyncio 기반 인박스/브로드캐스트, 관측용 이벤트 훅.
@@ -146,5 +148,6 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 - GPT-5.6 정확한 API 모델 ID 확인 (`gpt-5.6-terra` 추정, 확실하지 않음 —
   공식 문서가 자동화 접근 403이라 구현 착수 시 확인)
 - ChatGPT subscription 연동(Sign in with ChatGPT OAuth) 실현 가능성 — M2 착수 전 스파이크
-- 기본 팀 구성(역할 3~4개)의 구체 정의 — M1에서 초안 제시 후 확인
+- 기본 팀 구성 — 초안 제시됨(`configs/team.default.yaml`: researcher/analyst/writer,
+  unanimous) — **사용자 확인 대기**
 - 에이전트에게 부여할 작업 도구 범위 (초기: 텍스트 협업만 / 추후: 웹 검색, 코드 실행 등 서버 도구)

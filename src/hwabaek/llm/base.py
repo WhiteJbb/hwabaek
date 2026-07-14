@@ -139,8 +139,14 @@ class LLMResponse:
     model: str
 
     def __post_init__(self) -> None:
+        if not self.model:
+            raise ContractError("LLMResponse.model must be non-empty")
         if self.stop is StopReason.TOOL_USE and not self.tool_calls:
             raise ContractError("tool_use stop requires at least one tool call")
+        if self.stop is not StopReason.TOOL_USE and self.tool_calls:
+            raise ContractError(
+                f"stop reason {self.stop.value!r} must not carry tool calls"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,38 @@
 
 > 최신 항목이 위. 오류와 수정 내역 포함.
 
+## 2026-07-14 — M1 계약 확정 구현 (feat/m1-contracts)
+
+### 진행한 작업
+- 프로젝트 스켈레톤: pyproject.toml(setuptools, src 레이아웃) + requirements.txt +
+  네이티브 Python 3.11 venv (D-014).
+- **계약 직접 작성** (개발 지침 "아키텍처는 직접"): `src/hwabaek/contracts.py`
+  (스키마/상태 기계/화백 투표 집계 VoteTally/SSE 이벤트 헬퍼),
+  `src/hwabaek/llm/base.py`(프로바이더 중립 LLM 계약 + 귀책 구분 오류 계층) → 선 커밋.
+- **병렬 위임** (opus 2건, sonnet 2건, 파일 소유권 분리): 계약 단위 테스트 115개(opus),
+  FakeLLMClient + 테스트 23개(opus), YAML 로더 config.py + 기본 팀 초안 + 테스트 19개(sonnet),
+  docs/EventContract.md(sonnet).
+- **통합 리뷰 및 보강**: 최종 테스트 167개 전부 통과. README(팀 설정 스키마 섹션,
+  개발 환경)/Plan(M1 완료)/EventContract 갱신.
+
+### 오류/이슈 (모두 수정 완료)
+- pip이 requirements.txt를 cp949로 읽어 한글 주석에서 UnicodeDecodeError →
+  pip이 파싱하는 파일은 ASCII만 사용 (D-014에 기록).
+- git-bash의 python은 MSYS2 빌드라 venv가 POSIX 레이아웃(bin/)으로 생성됨 →
+  네이티브 `py -m venv`로 재생성.
+- (리뷰 발견) config.py에서 에이전트 이름 규칙 위반 시 임시 AgentSpec 생성이 try 밖이라
+  ContractError가 ConfigError로 감싸지지 않고 누출 → 수정 + 회귀 테스트 추가.
+- (리뷰 발견) 이벤트 계약 공백 2건 — 에이전트별 사용량(IA SC-03 요구)과 agent_error
+  귀책 기록(Plan 의미론 §3 요구)을 실을 필드 부재 → `usage.per_agent`,
+  `Session.fail_detail`, `agent_state.detail` 추가 (EventContract §7 참조).
+- (리뷰 발견) LLMResponse가 stop=end인데 tool_calls를 담는 모순 상태를 허용,
+  bool이 int 검증을 통과(파이썬 서브클래스) → 계약 검증 보강.
+
+### 다음 할 일
+- 기본 팀 초안(configs/team.default.yaml) 사용자 확인
+- M2 착수 전 스파이크: ChatGPT subscription(OAuth) 연동 검증 + GPT-5.6 모델 ID 확정
+- M2(코어 엔진): bus/agent/session + openai 어댑터 — feat/m2-core 브랜치
+
 ## 2026-07-14 — 설계 갭 검토 및 코어 의미론 확정 (M1 준비)
 
 ### 진행한 작업

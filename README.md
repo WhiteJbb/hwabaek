@@ -44,12 +44,38 @@
 - **실시간 관측성**: 세션별 메시지 타임라인, 에이전트 상태, 토큰 사용량/예산 게이지
 - **비용 통제**: 세션 토큰 예산, 프롬프트 캐싱(고정 시스템 프롬프트), 에이전트별 모델 선택
 
+## 팀 설정 (configs/*.yaml)
+
+팀은 YAML 파일 하나로 정의합니다. 전체 스키마와 기본 팀(조사자/분석가/작성자)은
+[configs/team.default.yaml](configs/team.default.yaml) 참조.
+
+```yaml
+name: default            # 팀 식별자 (소문자/숫자/_/-)
+description: ...         # 선택
+default_model: ...       # 선택 — 생략 시 계약 기본값(GPT-5.6 Terra)
+termination:             # 종료 정책 (전부 선택)
+  max_messages: 100      # 세션 메시지 상한
+  token_budget: 200000   # 세션 토큰 예산
+  idle_timeout: 30       # 전원 유휴 판정 시간(초)
+  approval: unanimous    # 화백 합의 정족수: unanimous | majority | first
+agents:                  # 1명 이상
+  - name: researcher     # 필수
+    role: ...            # 필수 — 대시보드 표시용
+    system_prompt: ...   # 필수
+    model: ...           # 선택 — 에이전트별 오버라이드
+    max_turns: 50        # 선택 — 에이전트당 LLM 호출 상한
+```
+
+허용되지 않은 키는 오타로 간주해 로드 시 즉시 거부됩니다(파일·필드 경로를 포함한
+오류 메시지). 대시보드가 구독하는 이벤트 스트림 계약은
+[docs/EventContract.md](docs/EventContract.md) 참조.
+
 ## 프로젝트 상태
 
 | 마일스톤 | 내용 | 상태 |
 |---|---|---|
 | M0 | 방향 결정, 기술 조사, 문서/계획 수립 | ✅ 완료 |
-| M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | 예정 |
+| M1 | 계약 확정 (메시지/에이전트/팀/세션 스키마) | ✅ 완료 |
 | M2 | 코어 엔진 (메시지 버스, 에이전트 루프, 종료 정책) | 예정 |
 | M3 | 서버 (FastAPI REST + SSE) | 예정 |
 | M4 | 웹 대시보드 | 예정 |
@@ -69,10 +95,13 @@
 ## 개발 환경 (Windows)
 
 ```
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt   # (M1에서 추가 예정)
+py -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python.exe -m unittest discover -s tests
 ```
+
+- venv는 네이티브 Windows Python(3.11+, `py` 런처)으로 만듭니다 — git-bash의
+  MSYS2 python은 venv 레이아웃이 달라 프로젝트 규칙과 어긋납니다 (DecisionLog D-014).
 
 - `OPENAI_API_KEY` 환경변수 또는 ChatGPT subscription 연동(M2 착수 전 검증 예정).
   API 키는 로그·대시보드에 노출되지 않습니다.
@@ -87,6 +116,7 @@ python -m venv .venv
 | [docs/DecisionLog.md](docs/DecisionLog.md) | 주요 의사결정과 근거 |
 | [docs/Research.md](docs/Research.md) | 기술 조사 (API/패턴 비교) |
 | [docs/IA.md](docs/IA.md) | 대시보드 화면 구조 |
+| [docs/EventContract.md](docs/EventContract.md) | SSE 이벤트 계약 (payload 스키마) |
 | [docs/UserScenarios.md](docs/UserScenarios.md) | 사용자 시나리오 |
 | [docs/Personas.md](docs/Personas.md) | 사용자 페르소나 |
 | [docs/Process.md](docs/Process.md) | 작업 방식/프로세스 |

@@ -117,7 +117,8 @@ class Usage:
     def __post_init__(self) -> None:
         for name in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"):
             value = getattr(self, name)
-            if not isinstance(value, int) or value < 0:
+            # bool은 int의 서브클래스지만 사용량 값으로는 타입 오류다.
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ContractError(f"Usage.{name} must be a non-negative int, got {value!r}")
 
     def __add__(self, other: "Usage") -> "Usage":
@@ -246,7 +247,11 @@ class AgentSpec:
             raise ContractError(f"agent {self.name!r}: system_prompt must be non-empty")
         if self.model is not None and not self.model:
             raise ContractError(f"agent {self.name!r}: model must be non-empty or omitted")
-        if not isinstance(self.max_turns, int) or self.max_turns < 1:
+        if (
+            isinstance(self.max_turns, bool)
+            or not isinstance(self.max_turns, int)
+            or self.max_turns < 1
+        ):
             raise ContractError(f"agent {self.name!r}: max_turns must be a positive int")
 
 
@@ -260,11 +265,15 @@ class TerminationPolicy:
     approval: ApprovalPolicy = ApprovalPolicy.UNANIMOUS
 
     def __post_init__(self) -> None:
-        if not isinstance(self.max_messages, int) or self.max_messages < 1:
-            raise ContractError("termination.max_messages must be a positive int")
-        if not isinstance(self.token_budget, int) or self.token_budget < 1:
-            raise ContractError("termination.token_budget must be a positive int")
-        if not isinstance(self.idle_timeout, (int, float)) or self.idle_timeout <= 0:
+        for name in ("max_messages", "token_budget"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ContractError(f"termination.{name} must be a positive int")
+        if (
+            isinstance(self.idle_timeout, bool)
+            or not isinstance(self.idle_timeout, (int, float))
+            or self.idle_timeout <= 0
+        ):
             raise ContractError("termination.idle_timeout must be a positive number")
 
 
@@ -416,6 +425,7 @@ class Session:
 
     불변식:
     - FAILED이면 fail_reason 필수, 그 외 상태에서는 금지.
+    - fail_detail(귀책 등 실패 상세 — 오류 귀책 원칙)은 FAILED에서만 허용.
     - COMPLETED이면 result/submitted_by 필수.
     - 종료 상태(TERMINAL_STATUSES)이면 finished_at 필수, 그 외에는 금지.
     """
@@ -428,6 +438,7 @@ class Session:
     result: str | None = None
     submitted_by: str | None = None
     fail_reason: FailReason | None = None
+    fail_detail: str | None = None
     usage: Usage = field(default_factory=Usage)
     finished_at: str | None = None
 
@@ -437,6 +448,8 @@ class Session:
                 raise ContractError(f"Session.{name} must be non-empty")
         if (self.status is SessionStatus.FAILED) != (self.fail_reason is not None):
             raise ContractError("fail_reason is required iff status is failed")
+        if self.fail_detail is not None and self.status is not SessionStatus.FAILED:
+            raise ContractError("fail_detail is only allowed when status is failed")
         if self.status is SessionStatus.COMPLETED and (
             self.result is None or self.submitted_by is None
         ):
@@ -459,6 +472,7 @@ class Session:
         new_status: SessionStatus,
         *,
         fail_reason: FailReason | None = None,
+        fail_detail: str | None = None,
         result: str | None = None,
         submitted_by: str | None = None,
         finished_at: str | None = None,
@@ -466,6 +480,8 @@ class Session:
         """상태 전이. 허용 전이표와 불변식을 강제하고 새 Session을 반환한다.
 
         종료 전이의 finished_at은 호출자(엔진)가 찍어서 전달한다.
+        FAILED 전이의 fail_detail에는 귀책 구분(클라이언트 잘못 vs 프로바이더 혼잡)을
+        포함한 실패 상세를 영어 ASCII로 남긴다.
         """
         if new_status not in _ALLOWED_TRANSITIONS[self.status]:
             raise InvalidTransition(
@@ -475,6 +491,7 @@ class Session:
             self,
             status=new_status,
             fail_reason=fail_reason,
+            fail_detail=fail_detail,
             result=result if result is not None else (
                 None if new_status is SessionStatus.RUNNING else self.result
             ),
@@ -494,6 +511,7 @@ class Session:
             "result": self.result,
             "submitted_by": self.submitted_by,
             "fail_reason": self.fail_reason.value if self.fail_reason else None,
+            "fail_detail": self.fail_detail,
             "usage": self.usage.to_dict(),
             "finished_at": self.finished_at,
         }
@@ -526,7 +544,7 @@ class Event:
     payload: dict[str, Any]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.seq, int) or self.seq < 0:
+        if isinstance(self.seq, bool) or not isinstance(self.seq, int) or self.seq < 0:
             raise ContractError("Event.seq must be a non-negative int")
         if not self.session_id or not self.at:
             raise ContractError("Event.session_id and Event.at must be non-empty")
@@ -550,6 +568,7 @@ def make_session_status_event(seq: int, session: Session, at: str) -> Event:
         payload={
             "status": session.status.value,
             "fail_reason": session.fail_reason.value if session.fail_reason else None,
+            "fail_detail": session.fail_detail,
         },
     )
 
@@ -565,26 +584,50 @@ def make_message_event(seq: int, message: Message) -> Event:
 
 
 def make_agent_state_event(
-    seq: int, session_id: str, agent: str, state: AgentState, at: str
+    seq: int,
+    session_id: str,
+    agent: str,
+    state: AgentState,
+    at: str,
+    detail: str | None = None,
 ) -> Event:
+    """detail에는 상태 변화의 사유를 담는다 — 특히 DEAD 전이 시 귀책을 포함한
+    실패 상세(영어 ASCII)를 남긴다 (오류 귀책 원칙)."""
     return Event(
         seq=seq,
         session_id=session_id,
         type=EventType.AGENT_STATE,
         at=at,
-        payload={"agent": agent, "state": state.value},
+        payload={"agent": agent, "state": state.value, "detail": detail},
     )
 
 
 def make_usage_event(
-    seq: int, session_id: str, usage: Usage, token_budget: int, at: str
+    seq: int,
+    session_id: str,
+    usage: Usage,
+    token_budget: int,
+    at: str,
+    per_agent: dict[str, Usage] | None = None,
 ) -> Event:
+    """usage는 세션 누적치, per_agent는 에이전트별 누적치 전체 맵.
+
+    per_agent는 매 발행 시 전체 맵을 다시 싣는다 — 대시보드가 누적 상태를
+    유지할 필요 없이 마지막 이벤트만으로 복원 가능 (IA SC-03 에이전트 패널).
+    """
     return Event(
         seq=seq,
         session_id=session_id,
         type=EventType.USAGE,
         at=at,
-        payload={"usage": usage.to_dict(), "token_budget": token_budget},
+        payload={
+            "usage": usage.to_dict(),
+            "token_budget": token_budget,
+            "per_agent": {
+                name: agent_usage.to_dict()
+                for name, agent_usage in sorted((per_agent or {}).items())
+            },
+        },
     )
 
 

@@ -125,3 +125,15 @@
 - **근거**: 비용 상한이 명확해지고(핵심 설계 과제 2 — 비용 통제), 대시보드 관찰도
   한 세션에 집중되는 개인 도구 용법에 부합. 상한 N 확장이 필요해지면 이 결정을 갱신.
 - **결정자**: 사용자 (Claude 추천 수용).
+
+## D-014 (2026-07-14) 패키징: setuptools + src 레이아웃, Python 3.11 하한
+
+- **결정**: `pyproject.toml`(setuptools) + `src/hwabaek/` 레이아웃, 개발 설치는
+  `pip install -r requirements.txt`(내용은 `-e .`). 런타임 의존성은 당분간 pyyaml만.
+  venv는 네이티브 Windows Python 3.11(`py -m venv .venv`)로 생성 — 하한 버전으로 검증.
+- **근거**: src 레이아웃은 테스트가 설치된 패키지를 임포트하게 강제해 경로 사고를 방지.
+  git-bash의 python은 MSYS2 빌드라 venv 레이아웃이 달라짐(`bin/`) — 프로젝트 규칙
+  (`.venv\Scripts\python.exe`)과 일치하도록 네이티브 인터프리터 사용을 명시.
+- **주의**: requirements.txt 등 pip이 파싱하는 파일은 **ASCII만** — 이 환경(cp949)에서
+  pip이 UTF-8 한글 주석을 디코드하지 못한다 (실제 발생, WorkLog 참조).
+- **결정자**: Claude (관례 수준의 선택, 이의 시 갱신).
