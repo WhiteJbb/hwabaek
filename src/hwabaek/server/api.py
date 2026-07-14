@@ -118,6 +118,8 @@ async def list_teams(request: Request, response: Response) -> dict:
     registry = _registry(request)
     try:
         teams = await registry.list_teams()
+    except UnknownTeamError as exc:
+        return _error(response, status.HTTP_400_BAD_REQUEST, str(exc))
     except ConfigError:
         # 설정 원문에는 API 키 같은 비밀값이 있을 수 있다.
         return _error(
@@ -125,7 +127,10 @@ async def list_teams(request: Request, response: Response) -> dict:
             status.HTTP_400_BAD_REQUEST,
             "team configuration is invalid",
         )
-    return {"teams": [team_summary(t) for t in teams]}
+    return {
+        "default_team": registry.default_team_name,
+        "teams": [team_summary(t) for t in teams],
+    }
 
 
 def _parse_last_event_id(raw: str | None) -> int:

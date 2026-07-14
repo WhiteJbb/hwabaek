@@ -37,9 +37,11 @@ function escapeHtml(value) {
   })[character]);
 }
 
-function totalTokens(usage = {}) {
-  return ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]
+function tokenTotals(usage = {}) {
+  const work = ["input_tokens", "output_tokens", "cache_write_tokens"]
     .reduce((sum, key) => sum + Number(usage[key] || 0), 0);
+  const cacheRead = Number(usage.cache_read_tokens || 0);
+  return { work, cacheRead, processed: work + cacheRead };
 }
 
 function number(value) {
@@ -98,6 +100,32 @@ function statusBadge(session) {
   return `<span class="status status-${escapeHtml(status)}">${escapeHtml(
     statusLabel(status, session?.fail_reason),
   )}</span>`;
+}
+
+function failureExplanation(session) {
+  const details = {
+    "processed token limit reached before next call": "캐시를 포함한 전체 처리 상한에 도달해 다음 호출을 시작하지 않았습니다. 태스크 범위를 줄이거나 Deep 팀을 선택해 다시 시도하세요.",
+    "processed token limit exceeded": "응답 정산 결과 캐시를 포함한 전체 처리 상한을 넘었습니다. 태스크 범위를 줄이거나 Deep 팀을 선택해 다시 시도하세요.",
+    "work token budget reserved for decision phase": "결론 단계에 필요한 호출 예약량보다 남은 작업 예산이 적어 종료했습니다. 더 짧은 태스크로 나누거나 Deep 팀을 선택하세요.",
+    "work token budget exceeded": "응답 정산 결과 작업 토큰 예산을 넘었습니다. 태스크를 나누거나 더 큰 팀 프로필을 선택하세요.",
+    "maximum proposal versions rejected": "허용된 수정 횟수 안에 승인을 얻지 못했습니다. 마지막 초안과 반려 사유를 확인해 태스크 조건을 명확히 한 뒤 다시 시도하세요.",
+    "no proposer calls remain for decision phase": "결과를 제출할 에이전트의 호출 횟수가 남지 않았습니다. 태스크를 더 작게 나누거나 더 큰 팀 프로필을 선택하세요.",
+    "proposer did not submit within decision call limit": "제안 단계의 두 번의 호출 안에 결과가 제출되지 않았습니다. 요구 결과를 더 구체적으로 적어 다시 시도하세요.",
+  };
+  if (details[session.fail_detail]) return details[session.fail_detail];
+  const guidance = {
+    budget: "작업 예산 또는 전체 처리 상한에 도달했습니다. 태스크 범위를 줄이거나 더 큰 팀 프로필을 선택하세요.",
+    messages: "메시지 상한에 도달했습니다. 태스크 범위를 좁히거나 요구 결과를 더 구체적으로 적어 주세요.",
+    idle: "에이전트가 결론을 내리지 못한 채 유휴 상태가 됐습니다. 요구 결과와 제약을 더 구체적으로 적어 다시 시도하세요.",
+    no_quorum: "필요한 승인을 얻지 못했습니다. 마지막 초안과 반려 사유를 확인한 뒤 조건을 보완해 다시 시도하세요.",
+    agent_error: "모델 호출 중 오류가 발생했습니다. 연결과 인증 상태를 확인한 뒤 다시 시도하세요.",
+    interrupted: "서버가 중단되어 세션을 마치지 못했습니다. 서버를 다시 시작한 뒤 재실행하세요.",
+  };
+  return guidance[session.fail_reason] || session.fail_detail || "세션을 완료하지 못했습니다.";
+}
+
+function profileLabel(team) {
+  return ({ quick: "Quick", default: "Standard", deep: "Deep" })[team.name] || team.name;
 }
 
 function setConnection(state, label) {
@@ -192,13 +220,35 @@ function errorPage(error, retry) {
   document.querySelector("#retry-button")?.addEventListener("click", retry);
 }
 
-function usageMarkup(usage, budget = null) {
-  const used = totalTokens(usage);
-  const percent = budget ? Math.min(100, Math.round((used / budget) * 100)) : 0;
+function budgetPhaseLabel(phase, work, termination = {}) {
+  const labels = {
+    discussion: "토론 단계",
+    synthesis: "종합 단계",
+    proposal: "제안 단계",
+    voting: "표결 단계",
+    revision: "수정 단계",
+  };
+  if (phase) return labels[phase] || String(phase);
+  if (termination.proposal_by && work >= termination.proposal_by) return labels.proposal;
+  if (termination.synthesis_at && work >= termination.synthesis_at) return labels.synthesis;
+  if (termination.synthesis_at || termination.proposal_by) return labels.discussion;
+  return null;
+}
+
+function usageMarkup(
+  usage,
+  budget = null,
+  processedLimit = null,
+  phase = null,
+  termination = {},
+) {
+  const totals = tokenTotals(usage);
+  const percent = budget ? Math.min(100, Math.round((totals.work / budget) * 100)) : 0;
+  const phaseLabel = budgetPhaseLabel(phase, totals.work, termination);
   return `
     <div class="usage-summary">
-      <div class="session-meta"><span>토큰 ${number(used)}</span>${budget ? `<span>예산 ${number(budget)}</span>` : ""}</div>
-      ${budget ? `<div class="usage-bar" role="progressbar" aria-label="토큰 예산 사용량" aria-valuemin="0" aria-valuemax="${budget}" aria-valuenow="${Math.min(used, budget)}"><span class="usage-fill" style="width:${percent}%"></span></div>` : ""}
+      <div class="session-meta"><span>작업 ${number(totals.work)}</span><span>캐시 재사용 ${number(totals.cacheRead)}</span><span>전체 처리 ${number(totals.processed)}</span>${budget ? `<span>작업 예산 ${number(budget)}</span>` : ""}${processedLimit ? `<span>처리 상한 ${number(processedLimit)}</span>` : ""}${phaseLabel ? `<span>현재 ${escapeHtml(phaseLabel)}</span>` : ""}</div>
+      ${budget ? `<div class="usage-bar" role="progressbar" aria-label="작업 토큰 예산 사용량" aria-valuemin="0" aria-valuemax="${budget}" aria-valuenow="${Math.min(totals.work, budget)}"><span class="usage-fill" style="width:${percent}%"></span></div>` : ""}
     </div>`;
 }
 
@@ -207,7 +257,7 @@ function sessionCard(session) {
     <a class="session-card" href="#/sessions/${encodeURIComponent(session.id)}">
       <div class="timeline-head">${statusBadge(session)}<time>${escapeHtml(dateTime(session.created_at))}</time></div>
       <h3>${escapeHtml(session.task)}</h3>
-      <div class="session-meta"><span>팀 ${escapeHtml(session.team_name)}</span><span>토큰 ${number(totalTokens(session.usage))}</span></div>
+      <div class="session-meta"><span>팀 ${escapeHtml(session.team_name)}</span><span>작업 ${number(tokenTotals(session.usage).work)}</span></div>
     </a>`;
 }
 
@@ -223,7 +273,13 @@ async function renderHome(version) {
     const teams = teamData.teams || [];
     const sessions = sessionData.sessions || [];
     const active = sessions.find((session) => session.status === "running" || session.status === "voting");
-    const teamOptions = teams.map((team) => `<option value="${escapeHtml(team.name)}"${team.name === "default" ? " selected" : ""}>${escapeHtml(team.name)} — ${escapeHtml(team.description || team.default_model)}</option>`).join("");
+    const selectedTeam = teamData.default_team || "default";
+    const defaultTeamExists = teams.some((team) => team.name === selectedTeam);
+    const teamOptions = teams.map((team) => {
+      const work = team.termination?.token_budget;
+      const agents = team.agents?.length || 0;
+      return `<option value="${escapeHtml(team.name)}"${team.name === selectedTeam ? " selected" : ""}>${escapeHtml(profileLabel(team))} · 작업 ${number(work)} · ${number(agents)}인 — ${escapeHtml(team.description || team.default_model)}</option>`;
+    }).join("");
     view.innerHTML = `
       <section class="page">
         <header class="page-header hero-header">
@@ -233,11 +289,13 @@ async function renderHome(version) {
         <div class="dashboard-grid">
           <section class="panel" aria-labelledby="new-session-title">
             <p class="eyebrow">새 의제</p><h2 id="new-session-title">화백에 부치기</h2>
+            ${defaultTeamExists ? "" : `<div class="notice notice-error" role="alert"><strong>서버 기본 팀을 찾을 수 없습니다.</strong><p>서버를 올바른 --team 값으로 다시 시작해 주세요.</p></div>`}
             <form id="session-form" class="form-stack">
-              <label class="field"><span>논의할 태스크</span><textarea id="task-input" name="task" rows="7" maxlength="12000" placeholder="예: 신규 서비스 아이디어의 장단점을 검토하고 실행 제안서를 작성해 줘" required ${active ? "disabled" : ""}></textarea></label>
-              <label class="field"><span>참여 팀</span><select id="team-select" name="team" ${active ? "disabled" : ""}>${teamOptions}</select></label>
+              <label class="field"><span>논의할 태스크</span><textarea id="task-input" name="task" rows="7" maxlength="12000" placeholder="예: 신규 서비스 아이디어의 장단점을 검토하고 실행 제안서를 작성해 줘" required ${active || !defaultTeamExists ? "disabled" : ""}></textarea></label>
+              <label class="field"><span>참여 팀</span><select id="team-select" name="team" aria-describedby="team-help" ${active || !defaultTeamExists ? "disabled" : ""}>${teamOptions}</select></label>
+              <p id="team-help" class="session-meta">Quick은 짧고 가역적인 선택, Standard는 일반 기술 결정, Deep은 고위험·비가역적 결정에 적합합니다.</p>
               <p id="form-error" class="notice notice-error" role="alert" hidden></p>
-              <button class="button button-primary" type="submit" ${active || !teams.length ? "disabled" : ""}>회의 시작</button>
+              <button class="button button-primary" type="submit" ${active || !teams.length || !defaultTeamExists ? "disabled" : ""}>회의 시작</button>
             </form>
           </section>
           <section class="panel" aria-labelledby="recent-title">
@@ -290,8 +348,8 @@ async function renderSessions(version) {
       <section class="page">
         <header class="page-header"><div><p class="eyebrow">회의록</p><h1>세션</h1><p class="page-intro">진행 중인 논의와 지난 합의의 기록입니다.</p></div><a class="button button-primary" href="#/">새 회의</a></header>
         <div class="panel">
-          ${sessions.length ? `<div class="table-wrap"><table class="session-table"><thead><tr><th>상태</th><th>태스크</th><th>팀</th><th>시작</th><th>토큰</th></tr></thead><tbody>${sessions.map((session) => `
-            <tr><td>${statusBadge(session)}</td><td><a href="#/sessions/${encodeURIComponent(session.id)}">${escapeHtml(session.task)}</a></td><td>${escapeHtml(session.team_name)}</td><td>${escapeHtml(dateTime(session.created_at))}</td><td>${number(totalTokens(session.usage))}</td></tr>`).join("")}</tbody></table></div>` : empty("저장된 세션이 없습니다.", '<a class="button button-primary" href="#/">첫 회의 시작</a>')}
+          ${sessions.length ? `<div class="table-wrap"><table class="session-table"><thead><tr><th>상태</th><th>태스크</th><th>팀</th><th>시작</th><th>작업 토큰</th></tr></thead><tbody>${sessions.map((session) => `
+            <tr><td>${statusBadge(session)}</td><td><a href="#/sessions/${encodeURIComponent(session.id)}">${escapeHtml(session.task)}</a></td><td>${escapeHtml(session.team_name)}</td><td>${escapeHtml(dateTime(session.created_at))}</td><td>${number(tokenTotals(session.usage).work)}</td></tr>`).join("")}</tbody></table></div>` : empty("저장된 세션이 없습니다.", '<a class="button button-primary" href="#/">첫 회의 시작</a>')}
         </div>
       </section>`;
   } catch (error) {
@@ -325,14 +383,17 @@ function proposalMarkup(proposal, votes) {
 function detailMarkup(context) {
   const { session, team, messages, proposals, votes } = context.data;
   const agents = team?.agents || [];
-  const budget = context.tokenBudget || team?.termination?.token_budget || null;
+  const termination = team?.termination || {};
+  const budget = context.tokenBudget ?? termination.token_budget ?? null;
+  const processedLimit = context.processedTokenLimit ?? termination.processed_token_limit ?? null;
   const active = session.status === "running" || session.status === "voting";
   const agentCards = agents.map((agent) => {
     const state = active
       ? (context.agentStates[agent.name] || { state: "idle", detail: "" })
       : { state: "finished", detail: "" };
     const usage = context.perAgentUsage[agent.name] || {};
-    return `<article class="agent-card"><div class="timeline-head"><strong>${escapeHtml(agent.name)}</strong><span class="tag">${escapeHtml(state.state)}</span></div><p>${escapeHtml(agent.role)}</p><div class="session-meta"><span>${escapeHtml(agent.model || team.default_model)}</span><span>토큰 ${number(totalTokens(usage))}</span></div>${state.detail ? `<p class="notice notice-error">${escapeHtml(state.detail)}</p>` : ""}</article>`;
+    const totals = tokenTotals(usage);
+    return `<article class="agent-card"><div class="timeline-head"><strong>${escapeHtml(agent.name)}</strong><span class="tag">${escapeHtml(state.state)}</span></div><p>${escapeHtml(agent.role)}</p><div class="session-meta"><span>${escapeHtml(agent.model || team.default_model)}</span><span>작업 ${number(totals.work)}</span><span>캐시 ${number(totals.cacheRead)}</span></div>${state.detail ? `<p class="notice notice-error">${escapeHtml(state.detail)}</p>` : ""}</article>`;
   }).join("");
   const vote = context.voteStatus;
   const votePanel = vote ? `<div class="notice notice-active"><strong>제안 ${number(vote.proposal_version)}차 표결</strong><div class="tag-list"><span class="tag">승인 ${number(vote.approvals?.length)}</span><span class="tag">반대 ${number(vote.rejections?.length)}</span><span class="tag">대기 ${number(vote.pending?.length)}</span><span class="tag">기권 ${number(vote.abstained?.length)}</span></div></div>` : "";
@@ -345,7 +406,7 @@ function detailMarkup(context) {
   return `
     <section class="page">
       <header class="page-header"><div><p class="eyebrow">세션 ${escapeHtml(session.id.slice(0, 8))}</p><h1>${escapeHtml(session.task)}</h1><div class="session-meta">${statusBadge(session)}<span>팀 ${escapeHtml(session.team_name)}</span><span>${escapeHtml(dateTime(session.created_at))}</span><span data-elapsed>경과 ${escapeHtml(elapsedTime(session.created_at, session.finished_at))}</span></div></div>${active ? '<button class="button button-danger" id="cancel-session" type="button">세션 취소</button>' : '<a class="button button-quiet" href="#/">새 회의</a>'}</header>
-      ${session.fail_detail ? `<div class="notice notice-error"><strong>${escapeHtml(statusLabel(session.status, session.fail_reason))}</strong><p>${escapeHtml(session.fail_detail)}</p></div>` : ""}
+      ${session.status === "failed" ? `<div class="notice notice-error"><strong>${escapeHtml(statusLabel(session.status, session.fail_reason))}</strong><p>${escapeHtml(failureExplanation(session))}</p></div>` : ""}
       ${votePanel}${outcome}
       <div class="detail-grid">
         <div>
@@ -353,7 +414,7 @@ function detailMarkup(context) {
           <section class="panel"><div class="section-heading"><div><p class="eyebrow">논의</p><h2>메시지 타임라인</h2></div><span>${number(messages.length)}건</span></div><div class="timeline">${messages.length ? [...messages].sort((a, b) => a.sequence - b.sequence).map((message) => messageMarkup(message, agents)).join("") : empty("아직 메시지가 없습니다. 에이전트가 생각을 시작하면 이곳에 표시됩니다.")}</div></section>
         </div>
         <aside>
-          <section class="panel"><p class="eyebrow">사용량</p><h2>토큰 예산</h2>${usageMarkup(session.usage, budget)}</section>
+          <section class="panel"><p class="eyebrow">사용량</p><h2>토큰 예산</h2>${usageMarkup(session.usage, budget, processedLimit, active ? context.budgetPhase : null, active ? termination : {})}</section>
           <section class="panel"><div class="section-heading"><div><p class="eyebrow">의결</p><h2>제안과 표결</h2></div></div><div class="proposal-list">${proposals.length ? [...proposals].sort((a, b) => a.version - b.version).map((proposal) => proposalMarkup(proposal, votes)).join("") : empty("아직 결과 제안이 없습니다.")}</div></section>
         </aside>
       </div>
@@ -462,7 +523,9 @@ function applyEvent(context, event) {
     context.agentStates[payload.agent] = { state: payload.state, detail: payload.detail || "" };
   } else if (event.type === "usage") {
     context.data.session.usage = payload.usage || context.data.session.usage;
-    context.tokenBudget = payload.token_budget || context.tokenBudget;
+    context.tokenBudget = payload.token_budget ?? context.tokenBudget;
+    context.processedTokenLimit = payload.processed_token_limit ?? context.processedTokenLimit;
+    context.budgetPhase = payload.phase ?? context.budgetPhase;
     context.perAgentUsage = payload.per_agent || context.perAgentUsage;
   } else if (event.type === "vote_status") {
     context.voteStatus = payload;
@@ -550,6 +613,8 @@ async function renderSessionDetail(id, version) {
       agentStates: {},
       perAgentUsage: {},
       tokenBudget: data.team?.termination?.token_budget || null,
+      processedTokenLimit: data.team?.termination?.processed_token_limit || null,
+      budgetPhase: null,
       voteStatus: null,
     };
     renderDetail(context);
@@ -570,8 +635,8 @@ async function renderTeams(version) {
         <header class="page-header"><div><p class="eyebrow">구성</p><h1>팀</h1><p class="page-intro">팀 구성은 YAML에 보존되며 이 화면에서는 읽기만 할 수 있습니다.</p></div></header>
         <div class="team-grid">${teams.map((team) => `
           <article class="team-card">
-            <div class="timeline-head"><div><p class="eyebrow">${escapeHtml(team.name)}</p><h2>${escapeHtml(team.description || team.name)}</h2></div><span class="tag">${escapeHtml(team.default_model)}</span></div>
-            <div class="session-meta"><span>메시지 ${number(team.termination.max_messages)}</span><span>토큰 ${number(team.termination.token_budget)}</span><span>유휴 ${number(team.termination.idle_timeout)}초</span><span>승인 ${escapeHtml(team.termination.approval.mode)}</span><span>투표 제한 ${number(team.termination.approval.voting_timeout)}초</span>${team.termination.approval.minimum_votes ? `<span>최소 ${number(team.termination.approval.minimum_votes)}표</span>` : ""}</div>
+            <div class="timeline-head"><div><p class="eyebrow">${escapeHtml(profileLabel(team))}</p><h2>${escapeHtml(team.description || team.name)}</h2></div><span class="tag">${escapeHtml(team.default_model)}</span></div>
+            <div class="session-meta"><span>메시지 ${number(team.termination.max_messages)}</span><span>작업 예산 ${number(team.termination.token_budget)}</span>${team.termination.processed_token_limit ? `<span>처리 상한 ${number(team.termination.processed_token_limit)}</span>` : ""}${team.termination.synthesis_at ? `<span>종합 시작 ${number(team.termination.synthesis_at)}</span>` : ""}${team.termination.proposal_by ? `<span>제안 강제 ${number(team.termination.proposal_by)}</span>` : ""}${team.termination.call_reserve_tokens ? `<span>호출 예약 ${number(team.termination.call_reserve_tokens)}</span>` : ""}${team.termination.max_proposals ? `<span>제안 최대 ${number(team.termination.max_proposals)}회</span>` : ""}<span>유휴 ${number(team.termination.idle_timeout)}초</span><span>승인 ${escapeHtml(team.termination.approval.mode)}</span><span>투표 제한 ${number(team.termination.approval.voting_timeout)}초</span>${team.termination.approval.minimum_votes ? `<span>최소 ${number(team.termination.approval.minimum_votes)}표</span>` : ""}</div>
             <div class="agent-grid">${(team.agents || []).map((agent) => `<section class="agent-card"><strong>${escapeHtml(agent.name)}</strong><p>${escapeHtml(agent.role)}</p><div class="session-meta"><span>${escapeHtml(agent.model)}</span><span>최대 ${number(agent.max_turns)}턴</span></div><div class="tag-list">${(agent.capabilities || []).map((capability) => `<span class="tag">${escapeHtml(capability)}</span>`).join("")}</div></section>`).join("")}</div>
           </article>`).join("") || empty("설정된 팀이 없습니다.")}</div>
       </section>`;

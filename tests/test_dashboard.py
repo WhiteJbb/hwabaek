@@ -112,6 +112,35 @@ class DashboardTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, script)
 
+    def test_dashboard_separates_work_cache_and_processed_token_usage(self) -> None:
+        with TestClient(self._app()) as client:
+            script = client.get("/app/app.js").text
+
+        for token in (
+            '["input_tokens", "output_tokens", "cache_write_tokens"]',
+            "usage.cache_read_tokens",
+            "작업 예산",
+            "캐시 재사용",
+            "전체 처리",
+            'aria-label="작업 토큰 예산 사용량"',
+            "processed_token_limit",
+            "payload.phase",
+            "synthesis_at",
+            "proposal_by",
+            "teamData.default_team",
+            "defaultTeamExists",
+            "서버 기본 팀을 찾을 수 없습니다.",
+            "Quick은 짧고 가역적인 선택",
+            "failureExplanation",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, script)
+
+        self.assertNotIn(
+            '["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]',
+            script,
+        )
+
     def test_static_mount_does_not_shadow_session_api(self) -> None:
         with TestClient(self._app()) as client:
             response = client.get("/sessions/nope")

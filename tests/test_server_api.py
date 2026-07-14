@@ -144,7 +144,10 @@ class ServerApiTest(unittest.TestCase):
 
         return provider, fakes
 
-    def _app(self, *, store=None, provider=None, team_override=None, teams_dir="configs"):
+    def _app(
+        self, *, store=None, provider=None, team_override=None,
+        teams_dir="configs", default_team="default",
+    ):
         if provider is None:
             provider, _ = self._submit_provider()
         return create_app(
@@ -152,6 +155,7 @@ class ServerApiTest(unittest.TestCase):
             teams_dir=teams_dir,
             llm_factory_provider=provider,
             team_override=team_override,
+            default_team=default_team,
         )
 
     def _wait_terminal(self, client, sid, timeout=5.0):
@@ -319,17 +323,38 @@ class ServerApiTest(unittest.TestCase):
     # 8) GET /teams (실 configs 로드 — default 팀 존재)
     # -----------------------------------------------------------------------
     def test_list_teams_real_configs(self) -> None:
-        app = self._app(store=self._store())
+        app = self._app(store=self._store(), default_team="quick")
         with TestClient(app) as client:
             r = client.get("/teams")
             self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["default_team"], "quick")
             names = [t["name"] for t in r.json()["teams"]]
             self.assertIn("default", names)
+            self.assertIn("quick", names)
+            self.assertIn("deep", names)
             default = next(t for t in r.json()["teams"] if t["name"] == "default")
             agent_names = [a["name"] for a in default["agents"]]
             self.assertIn("sangdaedeung", agent_names)
             # 에이전트 요약에 capabilities가 실린다.
             self.assertTrue(all("capabilities" in a for a in default["agents"]))
+            self.assertEqual(
+                default["termination"]["processed_token_limit"], 150_000
+            )
+            self.assertEqual(default["termination"]["synthesis_at"], 25_000)
+            self.assertEqual(default["termination"]["proposal_by"], 40_000)
+            self.assertEqual(default["termination"]["call_reserve_tokens"], 6_000)
+            self.assertEqual(default["termination"]["max_proposals"], 2)
+
+    def test_invalid_default_team_is_explicit_error_not_first_team_fallback(self) -> None:
+        app = self._app(store=self._store(), default_team="quik")
+        with TestClient(app) as client:
+            teams = client.get("/teams")
+            self.assertEqual(teams.status_code, 400)
+            self.assertEqual(teams.json()["detail"], "unknown team 'quik'")
+
+            session = client.post("/sessions", json={"task": "t"})
+            self.assertEqual(session.status_code, 400)
+            self.assertEqual(session.json()["detail"], "unknown team 'quik'")
 
     # -----------------------------------------------------------------------
     # 9) 서버 시작 시 interrupted 처리 (D-021)

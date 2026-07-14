@@ -34,7 +34,7 @@ from hwabaek.contracts import (
     VoteDecision,
 )
 from hwabaek.store.base import Store
-from hwabaek.store.sqlite import SQLiteStore
+from hwabaek.store.sqlite import SQLiteStore, _team_from_dict, _team_to_dict
 
 # 전역 고정 타임스탬프 (시계 의존 금지).
 TS = "2026-07-14T00:00:00Z"
@@ -209,6 +209,16 @@ class TestTeamSnapshotStorage(_StoreTestBase):
     async def test_missing_returns_none(self) -> None:
         self.assertIsNone(await self.store.get_team_snapshot("ghost"))
 
+    async def test_old_snapshot_without_budget_controls_uses_defaults(self) -> None:
+        team = _team()
+        data = _team_to_dict(team)
+        for key in (
+            "processed_token_limit", "synthesis_at", "proposal_by",
+            "call_reserve_tokens", "max_proposals",
+        ):
+            data["termination"].pop(key)
+        self.assertEqual(_team_from_dict(data), team)
+
     async def test_roundtrip_preserves_restricted_and_empty_capabilities(self) -> None:
         # 제한/빈 capabilities와 종료 정책 전체가 왕복 보존되는지 검증.
         team = TeamConfig(
@@ -235,6 +245,11 @@ class TestTeamSnapshotStorage(_StoreTestBase):
             termination=TerminationPolicy(
                 max_messages=42,
                 token_budget=123_456,
+                processed_token_limit=250_000,
+                synthesis_at=40_000,
+                proposal_by=80_000,
+                call_reserve_tokens=5_000,
+                max_proposals=3,
                 idle_timeout=12.5,
                 approval=ApprovalConfig(
                     mode=ApprovalPolicy.PARTICIPATING_UNANIMOUS,
@@ -256,6 +271,11 @@ class TestTeamSnapshotStorage(_StoreTestBase):
         )
         self.assertEqual(by_name["observer"].capabilities, frozenset())
         self.assertEqual(got.termination.approval.minimum_votes, 2)
+        self.assertEqual(got.termination.processed_token_limit, 250_000)
+        self.assertEqual(got.termination.synthesis_at, 40_000)
+        self.assertEqual(got.termination.proposal_by, 80_000)
+        self.assertEqual(got.termination.call_reserve_tokens, 5_000)
+        self.assertEqual(got.termination.max_proposals, 3)
 
 
 # ---------------------------------------------------------------------------

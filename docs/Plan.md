@@ -61,10 +61,9 @@
      invalid_tool_call/runtime_error/cancelled)와 재시도 가능 여부를 분리해
      세션 기록에 남긴다 — 오류 귀책 원칙.
    - **interrupted**: 서버 재시작 시 이전 running/voting 세션 처리 (D-021).
-   - **상태별 허용 명령** (계약 `ALLOWED_COMMANDS`, D-024): running =
-     send_message + submit_result / voting = send_message + vote_result
-     (심의 논의 허용) / 종료 상태 = 전부 거부. voting 중 submit_result는
-     도메인 오류로 거부, 반려로 running 복귀 후에만 새 버전 제출.
+   - **상태별 허용 명령** (계약 `ALLOWED_COMMANDS`, D-032): running =
+     send_message + submit_result / voting = vote_result만 / 종료 상태 = 전부 거부.
+     내부 proposal/revision 단계에서는 제출자에게 submit_result만 허용한다.
 4. **타이머 2종과 판정 주체 (D-019)**: `idle_timeout`은 running 전용 — 모든
    에이전트가 (a) 인박스 비어 있음 (b) LLM 호출 중 아님 상태로 지속되면 idle.
    `approval.voting_timeout`은 voting 전용 — 만료 시 미투표를 기권 처리하고
@@ -92,10 +91,10 @@
      미투표자가 있으면 failed(no_quorum) / `majority` = 스냅샷 심의자 **전체의
      과반** approve / `participating_unanimous` = 유효 투표자 전원 approve
      (`minimum_votes` 하한 지원) / `first` = 투표 생략 즉시 확정.
-   - **판정과 전환의 분리 (D-021)**: ConsensusEngine은 판정(ProposalOutcome)만
-     반환하고 세션 상태는 SessionManager가 전환한다. reject 발생 시 반려 —
-     사유가 제출자에게 전달되고 running 복귀. voting 중에도 메시지/토큰 예산은
-     계속 강제.
+   - **판정과 전환의 분리 (D-021/D-032)**: ConsensusEngine은 판정만 반환하고
+     세션 상태는 SessionManager가 전환한다. reject 발생 시 running으로 복귀하되
+     내부 revision 단계에서 원 제출자만 수정안을 제출한다. 일반 채팅은 다시 열지
+     않으며 기본 제안 버전 상한은 2개다.
    - **미승인 초안 보존 (D-025)**: 투표까지 갔지만 확정 없이 실패한 세션
      (no_quorum, voting 중 예산 초과 등)은 마지막 제안 content를
      `Session.draft_result`(+`draft_proposer`)로 보존한다 — 사용자가 최소한
@@ -133,7 +132,9 @@ src/hwabaek/
     events.py         # M3: SSE 이벤트 스트림
   dashboard/          # M4: 정적 웹 UI (HTML/JS, FastAPI가 서빙)
 configs/
-  team.default.yaml   # 기본 팀 구성 (범용: 조사자/분석가/작성자 등)
+  team.quick.yaml     # 빠른 2인 판단 (작업 25k)
+  team.default.yaml   # 표준 대등 3인 구조 (작업 60k)
+  team.deep.yaml      # 고위험 3인 심층 검토 (작업 100k)
 tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 ```
 
@@ -269,8 +270,22 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
   재접근을 수행할 수 있고, P-02가 도움 없이 제출→결과 핵심 경로를 찾을 수 있음.
 
 ### M5 — 견고화
-- 취소 레이스/타임아웃 경합(종료 우선순위 재검증), 서버 재시작 처리 고도화,
-  이력 compaction(요약 기반), E2E(실 스택) 테스트, 문서-코드 정합 점검.
+- **M5.1 예산·수렴 제어 (D-032, 기능 구현 완료·실안건 튜닝 진행 중)**:
+  - `Usage.work_tokens`(캐시 읽기 제외)와 `processed_tokens`(캐시 포함)를 분리하고
+    Standard 상한을 작업 60k / 전체 처리 150k로 설정한다.
+  - 작업 25k에서 종합을 유도하고 40k에서 심의자의 일반 토론을 닫아 상대등의
+    제안을 우선한다. 20k는 투표와 최대 한 차례 수정에 보존한다.
+  - 호출 전 6k 예약으로 동시 호출 초과를 제한하고, voting에서는 채팅 금지·투표
+    1회 교정 재시도·제안 최대 2개를 강제한다.
+  - 기본 3인 팀 `max_turns: 12`, `max_messages: 30`; Quick(25k 작업)과
+    Deep(100k 작업) 프로필을 별도 YAML로 제공한다.
+  - 대시보드는 작업/캐시/전체 처리를 분리하고 현재 예산 phase와 두 상한을 표시한다.
+  - 밀폐 검증: 캐시 읽기 제외/전체 처리 상한, 단계 전환·도구 제한, 동시 호출 예약,
+    투표 교정 1회, 제안 2개 상한, 프로필 로드와 대시보드 표시를 회귀 테스트한다.
+  - 실안건 튜닝 완료 기준: 대표 기술 안건 10개 중 8개 이상 완료, 작업 토큰 중앙값 40k 이하,
+    90%가 40k 이전 첫 제안, 제안 이후 budget 실패 0건, 호출 예약 초과 6k 이내.
+- 후속 견고화: 취소 레이스/타임아웃 경합(종료 우선순위 재검증), 서버 재시작 처리
+  고도화, 이력 compaction(요약 기반), E2E(실 스택) 테스트, 문서-코드 정합 점검.
 - 마일스톤 완료 시 3렌즈 병렬 검토(코드 정밀 / 신규 사용자 워크스루 / 문서-코드 일치성).
 
 ### M6 — 확장 실험 (후순위)

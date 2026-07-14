@@ -11,6 +11,7 @@ SessionCommands 프로토콜을 통해서만 하며, 프로바이더 SDK 타입�
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from hwabaek.contracts import (
@@ -25,6 +26,7 @@ from hwabaek.llm.base import (
     LLMError,
     LLMRequest,
     LLMResponse,
+    LLMRuntimeError,
     Role,
     StopReason,
     ToolCall,
@@ -118,6 +120,20 @@ class AgentStateHooks(Protocol):
 
     def on_fatal_error(self, agent: str, error: LLMError) -> None: ...
 
+    def on_exhausted(self, agent: str) -> None: ...
+
+    async def before_call(self, agent: str) -> bool: ...
+
+    async def after_call(self, agent: str, usage: Usage) -> None: ...
+
+    async def on_call_released(self, agent: str) -> None: ...
+
+    def tools_for(self, agent: str) -> frozenset[str]: ...
+
+    def instruction_for(self, agent: str) -> str | None: ...
+
+    def retry_instruction(self, agent: str) -> str | None: ...
+
 
 # 이력 절단 기본값 — 에이전트당 유지할 최대 턴 수 (시스템 프롬프트 별도).
 DEFAULT_HISTORY_LIMIT = 60
@@ -145,10 +161,9 @@ def merge_batch(messages: list[Message]) -> str:
                 "[action required] The session is now VOTING on the proposal "
                 "above. If you have the vote_result tool, cast your vote NOW "
                 "(approve, or reject with a concrete reason); you may omit "
-                "proposal_id to vote on this active proposal. Discussion is "
-                "allowed, but a chat message does NOT count as a vote, and "
-                "unvoted members are treated as abstaining when the voting "
-                "timeout expires."
+                "proposal_id to vote on this active proposal. General chat is "
+                "closed during voting. One corrective call is allowed; a member "
+                "that still does not vote is counted as abstaining."
             )
         elif message.type is MessageType.VOTE:
             decision = message.vote.value if message.vote else "vote"
@@ -232,28 +247,52 @@ class AgentLoop:
             self._hooks.on_state(self.name, AgentState.IDLE)
             await self._bus.wait_for_messages(self.name)
             batch = self._bus.drain(self.name)
-            if not batch:
+            drain_notices = getattr(self._bus, "drain_notices", None)
+            notices = drain_notices(self.name) if drain_notices else []
+            if not batch and not notices:
                 continue
-            self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
+            if batch:
+                self._turns.append(Turn(role=Role.USER, content=merge_batch(batch)))
+            for notice in notices:
+                self._turns.append(Turn(role=Role.USER, content=notice))
             await self._think_and_act()
 
         if not self._dead:
             self._hooks.on_state(
                 self.name, AgentState.IDLE, detail="max_turns exhausted"
             )
+            on_exhausted = getattr(self._hooks, "on_exhausted", None)
+            if on_exhausted is not None:
+                on_exhausted(self.name)
 
     async def _think_and_act(self) -> None:
         """LLM 호출 1회 + 후속 tool_use 체인 처리 (체인도 호출 수에 포함)."""
         while self._calls_made < self._max_turns:
+            before_call = getattr(self._hooks, "before_call", None)
+            if before_call is not None and not await before_call(self.name):
+                return
             self._hooks.on_state(self.name, AgentState.THINKING)
             self._turns = truncate_history(self._turns, self._history_limit)
+            instruction_for = getattr(self._hooks, "instruction_for", None)
+            instruction = instruction_for(self.name) if instruction_for else None
+            request_turns = tuple(self._turns)
+            if instruction:
+                request_turns += (Turn(role=Role.USER, content=instruction),)
+            tools_for = getattr(self._hooks, "tools_for", None)
+            allowed_tools = tools_for(self.name) if tools_for else None
+            tools = (
+                tuple(tool for tool in AGENT_TOOLS if tool.name in allowed_tools)
+                if allowed_tools is not None
+                else AGENT_TOOLS
+            )
             request = LLMRequest(
                 model=self._model,
                 system_prompt=self._system_prompt,
-                turns=tuple(self._turns),
-                tools=AGENT_TOOLS,
+                turns=request_turns,
+                tools=tools,
                 cache_system_prefix=True,
             )
+            response: LLMResponse | None = None
             try:
                 response = await self._llm.complete(request)
             except LLMError as error:
@@ -262,8 +301,30 @@ class AgentLoop:
                 self._dead = True
                 self._hooks.on_fatal_error(self.name, error)
                 return
+            except Exception:
+                self._dead = True
+                self._hooks.on_fatal_error(
+                    self.name,
+                    LLMRuntimeError("unexpected LLM client error"),
+                )
+                return
+            finally:
+                if response is None:
+                    release = getattr(self._hooks, "on_call_released", None)
+                    if release is not None:
+                        await release(self.name)
             self._calls_made += 1
-            self._hooks.on_usage(self.name, response.usage)
+            after_call = getattr(self._hooks, "after_call", None)
+            try:
+                if after_call is not None:
+                    await after_call(self.name, response.usage)
+                else:
+                    self._hooks.on_usage(self.name, response.usage)
+            except BaseException:
+                release = getattr(self._hooks, "on_call_released", None)
+                if release is not None:
+                    await asyncio.shield(release(self.name))
+                raise
             self._turns.append(
                 Turn(
                     role=Role.ASSISTANT,
@@ -272,16 +333,28 @@ class AgentLoop:
                 )
             )
             if response.stop is not StopReason.TOOL_USE:
+                retry_instruction = getattr(self._hooks, "retry_instruction", None)
+                retry = retry_instruction(self.name) if retry_instruction else None
+                if retry:
+                    self._turns.append(Turn(role=Role.USER, content=retry))
+                    continue
                 return
+            offered_tools = frozenset(tool.name for tool in tools)
             results = tuple(
-                self._execute_tool(call) for call in response.tool_calls
+                self._execute_tool(call, offered_tools) for call in response.tool_calls
             )
             # 병렬 tool_use여도 모든 결과를 하나의 user 턴으로 반환한다.
             self._turns.append(Turn(role=Role.USER, tool_results=results))
 
-    def _execute_tool(self, call: ToolCall) -> ToolResult:
+    def _execute_tool(
+        self, call: ToolCall, offered_tools: frozenset[str]
+    ) -> ToolResult:
         """도구 1건 실행 — 검증 실패는 구조화된 tool error로 반환한다 (§17)."""
         try:
+            if call.name not in offered_tools:
+                raise ToolError(
+                    f"tool {call.name!r} was not offered for this call"
+                )
             output = self._dispatch(call)
             return ToolResult(tool_call_id=call.id, content=output)
         except (ToolError, ContractError) as error:

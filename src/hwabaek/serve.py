@@ -71,7 +71,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--team", default="default",
-        help="default team for real runs when a request omits it; ignored with --fake",
+        help="default team name (built-ins: quick|default|deep) for real runs "
+             "when a request omits it; ignored with --fake",
     )
     parser.add_argument(
         "--auth", choices=["api_key", "chatgpt_oauth"], default="api_key",

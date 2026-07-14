@@ -27,6 +27,20 @@
 - [x] README·Plan·IA·DecisionLog·WorkLog 정합
 - [x] `feat/m4-dashboard` 브랜치 사용, git 산출물 AI 흔적 없음
 
+## M5.1 검증 기록 (2026-07-14)
+
+- [x] 전체 502개 테스트 3회 반복 통과 (6.600s / 6.684s / 6.684s)
+- [x] JavaScript 구문 검사, Python compileall, `git diff --check` 통과
+- [x] 밀폐 콘솔 제출→단계별 usage→완료 스모크와 잘못된 프로필 안내 확인
+- [x] 작업 토큰/캐시 읽기/전체 처리 분리와 두 예산 상한의 계약·저장·REST·UI 검증
+- [x] 호출 예약 경합, 단계 권한, 비행동 교정, 원 제출자 수정, 제안 2개 상한,
+  취소·예외·턴 소진 시 예약/에이전트 정리 회귀 테스트
+- [x] 잘못된 서버 기본 팀이 첫 번째 팀으로 암묵 대체되지 않고 400으로 중단됨
+- [x] 코드 정밀 / 신규 사용자 / 문서-코드 정합 3렌즈 검토와 발견 사항 수정
+- [x] README·Plan·IA·UserScenarios·EventContract·DecisionLog·WorkLog 정합
+- [ ] 실 API 대표 기술 안건 10건의 수렴·사용량 기준 측정 (기능 병합 후 실사용 표본으로 튜닝)
+- [x] `feat/m5-budget-control` 브랜치 사용, git 산출물 AI 흔적 없음
+
 ## 기능/정확성
 
 - [ ] 전체 테스트 통과: `.venv\Scripts\python.exe -m unittest discover -s tests`
@@ -51,11 +65,11 @@
 - [ ] 사용자 노출 문자열(로그, CLI, API 오류 메시지)이 영어 ASCII
 - [ ] 오류 귀책 구분이 정확 (클라이언트 잘못 vs API 혼잡 vs 시스템 버그)
 
-## 합의/이벤트 계약 (D-016~D-024)
+## 합의/이벤트 계약 (D-016~D-032)
 
 - [ ] 결과 제안에 version이 존재하고 반려 후 재제출 시 증가하는가
 - [ ] 모든 투표가 proposal_id를 참조하는가 (이전 제안 늦은 투표 무시)
-- [ ] 상태별 도구 호출 제한이 강제되는가 (running: send/submit, voting: send/vote, 종료: 전부 거부)
+- [ ] 상태별 도구 호출 제한이 강제되는가 (running: send/submit, proposal·revision: submit만, voting: vote만, 종료: 전부 거부)
 - [ ] voting_timeout과 idle_timeout이 분리되어 있고 voting 중 idle 종료가 발생하지 않는가
 - [ ] 세션 종료가 한 번만 확정되는가 (동시 종료 조건 경쟁 시 직렬화 + 우선순위)
 - [ ] unanimous가 미투표를 승인으로 처리하지 않는가 (timeout → no_quorum)

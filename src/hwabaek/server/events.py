@@ -66,6 +66,11 @@ def team_summary(team: TeamConfig) -> dict:
         "termination": {
             "max_messages": team.termination.max_messages,
             "token_budget": team.termination.token_budget,
+            "processed_token_limit": team.termination.effective_processed_token_limit,
+            "synthesis_at": team.termination.effective_synthesis_at,
+            "proposal_by": team.termination.effective_proposal_by,
+            "call_reserve_tokens": team.termination.effective_call_reserve_tokens,
+            "max_proposals": team.termination.effective_max_proposals,
             "idle_timeout": team.termination.idle_timeout,
             "approval": {
                 "mode": team.termination.approval.mode.value,
@@ -268,13 +273,25 @@ class SessionRegistry:
     def store(self) -> "Store | None":
         return self._store
 
+    @property
+    def default_team_name(self) -> str:
+        """요청에서 team을 생략했을 때 선택되는 팀 이름."""
+        if self._team_override is not None:
+            return self._team_override.name
+        return self._default_team
+
     # ---- 팀 조회 ----
 
     async def list_teams(self) -> list[TeamConfig]:
         if self._team_override is not None:
             return [self._team_override]
         # YAML 파일 I/O는 요청 경로를 블로킹하지 않도록 스레드로 위임한다.
-        return await asyncio.to_thread(list_team_configs, self._teams_dir)
+        teams = await asyncio.to_thread(list_team_configs, self._teams_dir)
+        # HTML select는 selected 항목이 없으면 첫 옵션을 암묵 선택한다. 잘못된 서버
+        # 기본값을 비용이 큰 다른 팀으로 조용히 대체하지 않도록 목록 경계에서 막는다.
+        if not any(team.name == self._default_team for team in teams):
+            raise UnknownTeamError(self._default_team)
+        return teams
 
     async def _resolve_team(self, team_name: str | None) -> TeamConfig:
         if self._team_override is not None:

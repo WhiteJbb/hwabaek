@@ -95,14 +95,21 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | `usage.output_tokens` | int (≥0) | 누적 출력 토큰. |
 | `usage.cache_read_tokens` | int (≥0) | 누적 캐시 읽기 토큰. |
 | `usage.cache_write_tokens` | int (≥0) | 누적 캐시 쓰기 토큰. |
-| `token_budget` | int | `TerminationPolicy.token_budget` — 게이지 분모. |
+| `work_tokens` | int | `input + output + cache_write`. 작업 예산 판정값. |
+| `processed_tokens` | int | `work_tokens + cache_read`. 전체 처리량 판정값. |
+| `token_budget` | int | 작업 토큰 상한 — 작업 게이지 분모. |
+| `processed_token_limit` | int 또는 null | 캐시 읽기를 포함한 전체 처리 상한. |
+| `phase` | string 또는 null | 내부 예산 단계: discussion, synthesis, proposal, voting, revision. |
+| `reserved_tokens` | int | 아직 정산되지 않은 진행 중 호출의 작업 토큰 예약 합계. |
 | `per_agent` | object | 에이전트 이름 → `Usage.to_dict()` 스키마의 누적치 맵(빈 객체 가능). |
 
 ```json
 {"event_id": "evt_000015", "session_id": "sess_8f3a1c", "type": "usage", "sequence": 15,
  "created_at": "2026-07-14T09:15:24.200Z",
  "payload": {"usage": {"input_tokens": 5230, "output_tokens": 812,
- "cache_read_tokens": 4096, "cache_write_tokens": 0}, "token_budget": 200000,
+ "cache_read_tokens": 4096, "cache_write_tokens": 0},
+ "work_tokens": 6042, "processed_tokens": 10138, "token_budget": 60000,
+ "processed_token_limit": 150000, "phase": "discussion", "reserved_tokens": 6000,
  "per_agent": {"analyst": {"input_tokens": 2100, "output_tokens": 300,
  "cache_read_tokens": 2048, "cache_write_tokens": 0}}}}
 ```
@@ -150,12 +157,12 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | `send_message` chat 발신 | `message` | |
 | `submit_result` 호출 (running에서만) | `message`(`result_proposal`) + `session_status`(`voting`) + `vote_status`(빈 집계 초기 스냅샷) | `running→voting`. 반려 후 재제출은 version이 오른 새 제안(D-016). voting 중 중복 submit은 거부되어 이벤트 없음. |
 | `vote_result` 호출 | `message`(`vote`) + `vote_status` | 투표는 브로드캐스트 메시지로도 남음(화백 원칙). 이전 제안에 대한 늦은 투표는 무시되어 `vote_status` 미발행. |
-| 무응답 기권 처리 (`voting_timeout` 만료) | `vote_status` | 메시지 이벤트 없음 — 엔진 내부 처리. `voting_timeout`은 `idle_timeout`과 분리된 voting 전용 타이머다(D-019). |
+| 무응답 기권 처리 (교정 호출 소진 또는 `voting_timeout` 만료) | `vote_status` | 메시지 이벤트 없음. voting 일반 채팅은 거부되며 미투표 응답에는 교정 호출을 한 번만 허용한다(D-032). |
 | 합의 승인 | `vote_status`(최종) + `session_status`(`completed`) + `result` | `voting→completed`. |
 | 합의 반려 | `vote_status`(최종) + `session_status`(`running`) | 사유는 이미 `vote` 메시지 content로 전달됨. |
 | 합의 무효(`no_quorum`) | `vote_status`(최종) + `session_status`(`failed`) | |
 | 에이전트 상태 전이 | `agent_state` | idle 판정은 세션의 단일 감시 태스크. |
-| LLM 호출 종료 후 사용량 갱신 | `usage` | |
+| LLM 호출 종료 후 사용량 갱신 또는 voting/revision 단계 전환 | `usage` | 단계 전환 이벤트는 사용량이 같아도 새 `phase` 스냅샷을 발행한다. |
 | 메시지/토큰/유휴 상한 초과 | `session_status`(`failed`, 해당 `fail_reason`) | |
 | 생존 에이전트 1개 이하 | `agent_state`(`dead`) + `session_status`(`failed`, `agent_error`) | |
 | 사용자 취소 | `session_status`(`cancelled`) | |
@@ -195,7 +202,7 @@ payload는 `Message.to_dict()`와 동일 스키마.
 | UI 요소 | 소비 이벤트 |
 |---|---|
 | 상태 배지 / 경과 시간 | `session_status` |
-| 누적 토큰/예산 게이지 | `usage` |
+| 작업/캐시/전체 처리량, 예산 게이지와 단계 | `usage` |
 | 메시지 타임라인 | `message` |
 | 에이전트 패널 — 상태 | `agent_state` (dead 사유는 `payload.detail`) |
 | 에이전트 패널 — 개별 토큰 사용량 | `usage` (`payload.per_agent`) |
@@ -215,7 +222,7 @@ payload는 `Message.to_dict()`와 동일 스키마.
 집계 `EventType`에 payload로 매핑된다 — 소비자는 payload 필드로 세분 의미를
 식별한다. 세분이 실제로 필요한 소비자가 M4에서 등장하면 payload 필드 추가 또는
 신규 타입으로 확장하며, 봉투는 이미 호환된다. `limit.warning`(예산 임박)은 현재
-별도 이벤트가 없다 — usage 이벤트에서 token_budget 대비 비율로 판단한다.
+별도 이벤트가 없다 — usage 이벤트의 phase와 작업/전체 처리량 대비 상한으로 판단한다.
 
 아래는 코드의 6개 집계 타입을 설명하기 위한 논리 이벤트 참고 목록이다. 별도 enum이나
 와이어 타입이 아니며, 소비자는 §3 payload와 §4 발행 규칙을 계약으로 사용한다.

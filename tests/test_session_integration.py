@@ -29,7 +29,7 @@ from hwabaek.contracts import (
 from hwabaek.contracts import AgentCapability
 from hwabaek.llm.base import LLMServerError
 from hwabaek.llm.fake import text_response, tool_response
-from hwabaek.session import SessionManager
+from hwabaek.session import BudgetPhase, SessionManager, ToolError
 
 CLOCK = "2026-07-14T00:00:00Z"
 TIMEOUT = 5.0  # 개별 run()의 행 방지 상한
@@ -189,6 +189,11 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         voting_timeout: float = 0.05,
         max_messages: int = 100,
         token_budget: int = 200_000,
+        processed_token_limit: int | None = None,
+        synthesis_at: int | None = None,
+        proposal_by: int | None = None,
+        call_reserve_tokens: int | None = None,
+        max_proposals: int | None = None,
         task: str = "produce the deliverable",
     ):
         """(name, script) 목록으로 팀/매니저를 조립한다. 반환: (manager, coll, fakes)."""
@@ -199,6 +204,11 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             termination=TerminationPolicy(
                 max_messages=max_messages,
                 token_budget=token_budget,
+                processed_token_limit=processed_token_limit,
+                synthesis_at=synthesis_at,
+                proposal_by=proposal_by,
+                call_reserve_tokens=call_reserve_tokens,
+                max_proposals=max_proposals,
                 idle_timeout=idle_timeout,
                 approval=ApprovalConfig(mode=mode, voting_timeout=voting_timeout),
             ),
@@ -243,15 +253,12 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         # session_status 이벤트 순서: running -> voting -> completed.
         self.assertEqual(coll.statuses(), ["running", "voting", "completed"])
 
-    async def test_voting_chat_gets_unvoted_reminder(self) -> None:
-        """voting 중 미투표 심의자의 채팅 tool result에 vote_result 리마인더가
-        붙고, 제안 메시지는 채팅과 구별되는 마커+투표 지시로 렌더링된다
-        (실 스모크 대응 — 심의자들이 채팅으로만 동의하다 전원 기권)."""
+    async def test_voting_chat_is_rejected_then_vote_is_retried(self) -> None:
+        """voting 중 채팅은 거부되고 한 번의 교정 호출은 투표로 이어진다."""
         manager, _, fakes = self._build(
             [
                 ("writer", [_submit("the deliverable")]),
                 ("analyst", [
-                    _text(),
                     _chat("still checking", recipients=["writer"]),
                     _vote("approve"),
                 ]),
@@ -263,33 +270,31 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         session = await self._run(manager)
         self.assertEqual(session.status, SessionStatus.COMPLETED)
 
-        # 제안 렌더링: 마커 + 행동 지시가 analyst의 입력 턴에 존재한다.
+        # 경합과 무관하게 voting 단계 행동 지시가 입력에 존재한다.
         analyst_inputs = "\n".join(
             turn.content
             for req in fakes["analyst"].calls
             for turn in req.turns
             if turn.content
         )
-        self.assertIn("[result proposal from writer]", analyst_inputs)
-        self.assertIn("[action required]", analyst_inputs)
+        self.assertIn("[budget phase: voting]", analyst_inputs)
 
-        # voting 중 채팅의 tool result에 미투표 리마인더가 붙는다.
+        # voting 중 채팅의 tool result에는 명시적인 거부 사유가 붙는다.
         tool_outputs = "\n".join(
             result.content
             for req in fakes["analyst"].calls
             for turn in req.turns
             for result in turn.tool_results
         )
-        self.assertIn("you have NOT voted", tool_outputs)
+        self.assertIn("was not offered for this call", tool_outputs)
 
     async def test_bogus_proposal_id_vote_gets_corrective_result(self) -> None:
         """지어낸 proposal_id로 투표하면 무시 대신 활성 제안 id를 알려주는 교정
         메시지를 받고, 재투표(id 생략)로 합의가 완료된다 (실 스모크 대응)."""
-        manager, _, fakes = self._build(
+        manager, coll, fakes = self._build(
             [
                 ("writer", [_submit("the deliverable")]),
                 ("analyst", [
-                    _text(),
                     _vote("approve", proposal_id="made-up-id"),
                     _vote("approve"),
                 ]),
@@ -311,8 +316,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("made-up-id", tool_outputs)
         self.assertIn("ACTIVE proposal", tool_outputs)
         self.assertIn("omit proposal_id", tool_outputs)
-        # 두 번째(정상) 투표는 기록된다.
-        self.assertIn("vote recorded (approve)", tool_outputs)
+        # 두 번째(정상) 투표는 메시지로 기록된다.
+        self.assertEqual(len(coll.messages(MessageType.VOTE)), 2)
 
     async def test_tool_error_is_visible_as_agent_state_detail(self) -> None:
         """도구 오류(예: running 중 vote_result)는 agent_state 이벤트 detail로
@@ -373,8 +378,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         reason = "needs more supporting detail"
         manager, coll, _ = self._build([
             # 제출 v1 -> (park) -> 재제출 v2. 중간 text가 없으면 voting 중 재제출이라 거부됨.
-            ("writer", [_submit("draft one"), _text("await votes"), _submit("draft two final")]),
-            ("analyst", [_text(), _vote("reject", reason=reason), _text("await v2"), _vote("approve")]),
+            ("writer", [_submit("draft one"), _submit("draft two final")]),
+            ("analyst", [_vote("reject", reason=reason), _vote("approve")]),
         ])
         session = await self._run(manager)
 
@@ -402,7 +407,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         manager, coll, _ = self._build([
             ("writer", [_submit("the deliverable")]),
             # analyst가 voting 중 submit 시도(거부) 후 정상 투표.
-            ("analyst", [_text(), _submit("sneaky second proposal"), _vote("approve")]),
+            ("analyst", [_submit("sneaky second proposal"), _vote("approve")]),
             ("reviewer", [_text(), _vote("approve")]),
         ])
         session = await self._run(manager)
@@ -421,7 +426,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         manager, coll, _ = self._build([
             ("writer", [_submit("the deliverable")]),
             # stale-id 투표(무시) 후 활성 제안에 정상 투표.
-            ("analyst", [_text(), _vote("approve", proposal_id="stale-id"), _vote("approve")]),
+            ("analyst", [_vote("approve", proposal_id="stale-id"), _vote("approve")]),
             ("reviewer", [_text(), _vote("approve")]),
         ])
         session = await self._run(manager)
@@ -509,6 +514,166 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.fail_reason, FailReason.BUDGET)
         self.assertTrue(coll.has_type(EventType.USAGE))
 
+    async def test_cache_reads_do_not_consume_work_budget(self) -> None:
+        cached = tool_response(
+            "submit_result",
+            {"content": "cached deliverable"},
+            usage=Usage(input_tokens=20, output_tokens=5, cache_read_tokens=1000),
+        )
+        manager, _, _ = self._build(
+            [("writer", [cached]), ("helper", [])],
+            mode=ApprovalPolicy.FIRST,
+            token_budget=100,
+            processed_token_limit=2000,
+            synthesis_at=40,
+            proposal_by=70,
+            call_reserve_tokens=10,
+            idle_timeout=1.0,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.usage.cache_read_tokens, 1000)
+        self.assertLess(session.usage.work_tokens, 100)
+        self.assertGreater(session.usage.processed_tokens, 100)
+
+    async def test_processed_limit_still_caps_large_cache_reuse(self) -> None:
+        cached = text_response(
+            "cached context",
+            usage=Usage(input_tokens=20, cache_read_tokens=200),
+        )
+        manager, _, _ = self._build(
+            [("reader", [cached]), ("helper", [])],
+            token_budget=100,
+            processed_token_limit=100,
+            synthesis_at=40,
+            proposal_by=70,
+            call_reserve_tokens=10,
+            idle_timeout=1.0,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.BUDGET)
+        self.assertEqual(session.fail_detail, "processed token limit exceeded")
+
+    async def test_proposal_phase_wakes_only_submitter_and_filters_tools(self) -> None:
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        vote_only = frozenset({AgentCapability.VOTE_RESULT})
+        expensive = text_response("drafting", usage=Usage(input_tokens=55))
+        manager, coll, fakes = self._build_with_capabilities(
+            [
+                (
+                    "writer",
+                    [expensive, _text("forgot to submit"), _submit("budgeted result")],
+                    submit_only,
+                ),
+                ("reviewer", [_text(), _vote("approve")], vote_only),
+            ],
+            token_budget=120,
+            processed_token_limit=300,
+            synthesis_at=30,
+            proposal_by=50,
+            call_reserve_tokens=10,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.result, "budgeted result")
+        proposal_requests = [
+            request for request in fakes["writer"].calls
+            if any("[budget phase: proposal]" in (turn.content or "")
+                   for turn in request.turns)
+        ]
+        self.assertTrue(proposal_requests)
+        self.assertEqual(
+            [tool.name for tool in proposal_requests[-1].tools],
+            ["submit_result"],
+        )
+        usage_phases = [
+            event.payload["phase"] for event in coll.events
+            if event.type is EventType.USAGE
+        ]
+        self.assertIn(BudgetPhase.PROPOSAL.value, usage_phases)
+
+    async def test_call_reservation_serializes_calls_near_budget(self) -> None:
+        manager, _, _ = self._build(
+            [("a", []), ("b", [])],
+            token_budget=100,
+            call_reserve_tokens=60,
+        )
+        self.assertTrue(await manager._before_agent_call("a"))
+        waiting = asyncio.create_task(manager._before_agent_call("b"))
+        await asyncio.sleep(0)
+
+        self.assertFalse(waiting.done())
+        self.assertEqual(manager._call_reservations, {"a": 60})
+        await manager._release_agent_call("a")
+        self.assertTrue(await asyncio.wait_for(waiting, TIMEOUT))
+        self.assertEqual(manager._call_reservations, {"b": 60})
+        await manager._release_agent_call("b")
+
+    async def test_proposer_turn_exhaustion_fails_without_stranded_notice(self) -> None:
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        vote_only = frozenset({AgentCapability.VOTE_RESULT})
+        expensive = text_response("drafting", usage=Usage(input_tokens=55))
+        manager, _, _ = self._build_with_capabilities(
+            [
+                ("writer", [expensive], submit_only),
+                ("reviewer", [_text()], vote_only),
+            ],
+            token_budget=120,
+            processed_token_limit=300,
+            synthesis_at=30,
+            proposal_by=50,
+            call_reserve_tokens=10,
+            agent_max_turns=1,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.BUDGET)
+        self.assertEqual(
+            session.fail_detail, "no proposer calls remain for decision phase"
+        )
+
+    async def test_revision_accepts_only_original_proposer(self) -> None:
+        manager, _, _ = self._build(
+            [("writer", []), ("reviewer", [])],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        manager.submit_result("writer", "draft one")
+        manager.vote_result("reviewer", "", "reject", "needs correction")
+
+        self.assertEqual(manager.budget_phase, BudgetPhase.REVISION)
+        with self.assertRaisesRegex(ToolError, "only the original proposer"):
+            manager.submit_result("reviewer", "unauthorized revision")
+
+    async def test_second_rejected_proposal_ends_at_version_limit(self) -> None:
+        submit_only = frozenset({AgentCapability.SUBMIT_RESULT})
+        vote_only = frozenset({AgentCapability.VOTE_RESULT})
+        manager, _, _ = self._build_with_capabilities(
+            [
+                ("writer", [_submit("draft one"), _submit("draft two")], submit_only),
+                (
+                    "reviewer",
+                    [
+                        _vote("reject", reason="first defect"),
+                        _vote("reject", reason="still defective"),
+                    ],
+                    vote_only,
+                ),
+            ],
+            max_proposals=2,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.NO_QUORUM)
+        self.assertEqual(session.fail_detail, "maximum proposal versions rejected")
+        self.assertEqual(session.draft_result, "draft two")
+
     # -----------------------------------------------------------------------
     # 9) 에이전트 사망 -> failed(agent_error) (귀책 detail 포함)
     # -----------------------------------------------------------------------
@@ -536,6 +701,19 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(dead)
         self.assertIn("provider_error", dead[0].payload["detail"])
+
+    async def test_unexpected_client_exception_fails_runtime_error(self) -> None:
+        manager, _, _ = self._build(
+            [("broken", [ValueError("sensitive provider detail")]), ("survivor", [])],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.FAILED)
+        self.assertEqual(session.fail_reason, FailReason.AGENT_ERROR)
+        self.assertIn("runtime_error", session.fail_detail)
+        self.assertNotIn("sensitive provider detail", session.fail_detail)
 
     async def test_all_agents_dying_fails_agent_error_not_idle(self) -> None:
         """3인 전원 사망 -> failed(agent_error), failed(idle) 아님 (회귀 — 실 스모크).
@@ -598,16 +776,32 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
     async def test_idle_timer_does_not_fire_during_voting(self) -> None:
         """voting 중 에이전트가 유휴여도, idle_timeout << voting_timeout이라도
         세션이 failed(idle)로 죽지 않고 투표 완료 후 completed."""
-        manager, coll, _ = self._build(
+        manager, coll, fakes = self._build(
             [
                 ("writer", [_submit("the deliverable")]),
-                # 두 심의자는 제안 수신 후 일단 ack(text)만 하고 유휴로 든다 -> 트리거 후 투표.
-                ("analyst", [_text(), _text("ack"), _vote("approve")]),
-                ("reviewer", [_text(), _text("ack"), _vote("approve")]),
+                ("analyst", []),
+                ("reviewer", []),
             ],
             idle_timeout=0.02,
             voting_timeout=1.0,
         )
+        release_votes = asyncio.Event()
+
+        class DelayedVoter:
+            def __init__(self) -> None:
+                self.calls = []
+                self._first = True
+
+            async def complete(self, request):
+                self.calls.append(request)
+                if self._first:
+                    self._first = False
+                    return _text("ack")
+                await release_votes.wait()
+                return _vote("approve")
+
+        fakes["analyst"] = DelayedVoter()
+        fakes["reviewer"] = DelayedVoter()
         run_task = asyncio.create_task(manager.run())
         await asyncio.wait_for(coll.status_gate(SessionStatus.VOTING).wait(), TIMEOUT)
 
@@ -616,8 +810,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertIs(manager.session.status, SessionStatus.VOTING)
 
-        # 이제 심의자들을 깨워 투표시킨다(voting 중 send_message 허용).
-        manager.send_message("writer", ["analyst", "reviewer"], "please cast your votes")
+        # 대기 중인 교정 호출을 풀어 투표시킨다.
+        release_votes.set()
         session = await asyncio.wait_for(run_task, TIMEOUT)
 
         self.assertEqual(session.status, SessionStatus.COMPLETED)
@@ -642,6 +836,8 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.status, SessionStatus.COMPLETED)
         self.assertEqual(session.result, "done immediately")
+        with self.assertRaises(ToolError):
+            manager.send_message("late", ["worker"], "too late")
         # 세션 상태 불변 + 감사 기록.
         self.assertTrue(manager.rejected_commands)
         self.assertTrue(
@@ -649,21 +845,21 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
 
     # -----------------------------------------------------------------------
-    # 13) voting 중 send_message 허용
+    # 13) voting 중 send_message 거부
     # -----------------------------------------------------------------------
-    async def test_send_message_allowed_during_voting(self) -> None:
-        """voting 중 chat이 배달되고 세션은 정상 완료된다."""
+    async def test_send_message_rejected_during_voting(self) -> None:
+        """voting 중 chat은 거부되고 한 번의 교정 호출로 정상 투표할 수 있다."""
         manager, coll, _ = self._build([
             ("writer", [_submit("the deliverable")]),
             # analyst가 voting 중 브로드캐스트 chat 후 투표.
-            ("analyst", [_text(), _chat("discuss the draft before voting"), _vote("approve")]),
+            ("analyst", [_chat("discuss the draft before voting"), _vote("approve")]),
             ("reviewer", [_text(), _vote("approve")]),
         ])
         session = await self._run(manager)
 
         self.assertEqual(session.status, SessionStatus.COMPLETED)
         chats = coll.messages(MessageType.CHAT)
-        self.assertTrue(
+        self.assertFalse(
             any("discuss the draft before voting" in e.payload["content"] for e in chats)
         )
 
@@ -679,6 +875,12 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         voting_timeout: float = 1.0,
         max_messages: int = 100,
         token_budget: int = 200_000,
+        processed_token_limit: int | None = None,
+        synthesis_at: int | None = None,
+        proposal_by: int | None = None,
+        call_reserve_tokens: int | None = None,
+        max_proposals: int | None = None,
+        agent_max_turns: int = 50,
         task: str = "produce the deliverable",
     ):
         """_build와 동일하나 (name, script, capabilities) 3튜플로 에이전트별 권한을 지정한다.
@@ -693,6 +895,7 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 role="tester",
                 system_prompt="You are a hermetic test agent.",
                 capabilities=capabilities,
+                max_turns=agent_max_turns,
             )
             for name, _, capabilities in agents_scripts
         )
@@ -702,6 +905,11 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             termination=TerminationPolicy(
                 max_messages=max_messages,
                 token_budget=token_budget,
+                processed_token_limit=processed_token_limit,
+                synthesis_at=synthesis_at,
+                proposal_by=proposal_by,
+                call_reserve_tokens=call_reserve_tokens,
+                max_proposals=max_proposals,
                 idle_timeout=idle_timeout,
                 approval=ApprovalConfig(mode=mode, voting_timeout=voting_timeout),
             ),

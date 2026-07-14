@@ -60,7 +60,8 @@ class MergeBatchTest(unittest.TestCase):
         self.assertIn("vote_result", merged)
         self.assertIn("omit proposal_id", merged)
         # 채팅은 투표가 아님을 명시한다.
-        self.assertIn("does NOT count as a vote", merged)
+        self.assertIn("General chat is closed during voting", merged)
+        self.assertIn("One corrective call is allowed", merged)
 
     def test_vote_renders_decision_and_reason(self) -> None:
         merged = merge_batch([

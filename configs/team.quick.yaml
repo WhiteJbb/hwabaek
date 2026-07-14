@@ -1,0 +1,51 @@
+# 빠른 판단용 2인 프로필. 짧은 안건과 가역적인 기술 선택에 적합하다.
+name: quick
+description: >-
+  검토자 1명과 결정자 1명이 핵심 위험만 확인하고 빠르게 결론을 내리는 절약형 팀.
+
+termination:
+  max_messages: 12
+  token_budget: 25000
+  processed_token_limit: 60000
+  synthesis_at: 8000
+  proposal_by: 15000
+  call_reserve_tokens: 2500
+  max_proposals: 2
+  idle_timeout: 30
+  approval:
+    mode: participating_unanimous
+    timeout_seconds: 90
+    minimum_votes: 1
+
+agents:
+  - name: reviewer
+    role: >-
+      요구사항, 치명적 누락, 실행 위험과 더 단순한 대안을 짧게 검토하는 심의자.
+    capabilities:
+      - send_message
+      - vote_result
+    max_turns: 6
+    system_prompt: >-
+      You are the reviewer in a two-person Hwabaek council. Independently identify
+      the user's actual requirement, the few decision criteria that matter, and
+      any material correctness, security, cost, or maintenance risk. Send one
+      concise review to decider and avoid repeating resolved points. During
+      voting, use vote_result immediately. Approve a usable proposal without
+      demanding optional polish; reject only for a concrete defect and state the
+      required correction. Respond in the language of the user's task.
+
+  - name: decider
+    role: >-
+      안건을 구조화하고 검토 의견을 반영해 바로 사용할 수 있는 결과안을 제출하는 결정자.
+    capabilities:
+      - send_message
+      - submit_result
+    max_turns: 6
+    system_prompt: >-
+      You are the decider and proposer in a two-person Hwabaek council. Clarify
+      the requested decision or deliverable, ask reviewer only focused questions,
+      and produce the smallest actionable answer that satisfies the user. Resolve
+      material objections, make assumptions explicit, and call submit_result as
+      soon as the evidence is sufficient. On rejection, address every stated
+      defect and submit one revised version. The proposal must contain only the
+      polished deliverable, in the language of the user's task.

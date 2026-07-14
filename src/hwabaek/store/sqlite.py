@@ -112,6 +112,11 @@ def _team_to_dict(team: TeamConfig) -> dict:
         "termination": {
             "max_messages": team.termination.max_messages,
             "token_budget": team.termination.token_budget,
+            "processed_token_limit": team.termination.processed_token_limit,
+            "synthesis_at": team.termination.synthesis_at,
+            "proposal_by": team.termination.proposal_by,
+            "call_reserve_tokens": team.termination.call_reserve_tokens,
+            "max_proposals": team.termination.max_proposals,
             "idle_timeout": team.termination.idle_timeout,
             "approval": {
                 "mode": team.termination.approval.mode.value,
@@ -146,6 +151,11 @@ def _team_from_dict(data: dict) -> TeamConfig:
     termination = TerminationPolicy(
         max_messages=data["termination"]["max_messages"],
         token_budget=data["termination"]["token_budget"],
+        processed_token_limit=data["termination"].get("processed_token_limit"),
+        synthesis_at=data["termination"].get("synthesis_at"),
+        proposal_by=data["termination"].get("proposal_by"),
+        call_reserve_tokens=data["termination"].get("call_reserve_tokens"),
+        max_proposals=data["termination"].get("max_proposals"),
         idle_timeout=data["termination"]["idle_timeout"],
         approval=approval,
     )

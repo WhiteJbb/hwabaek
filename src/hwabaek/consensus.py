@@ -191,6 +191,19 @@ class ConsensusEngine:
         )
         return self._state
 
+    def register_abstention(self, voter: str) -> ConsensusState | None:
+        """심의자 1명을 즉시 기권 처리하고 현재 판정을 반환한다 (D-032)."""
+        if self._state is None or voter not in self._state.tally.pending:
+            return None
+        tally = self._state.tally.with_abstained(frozenset({voter}))
+        outcome = tally.decide(self._approval)
+        self._state = ConsensusState(
+            proposal=self._state.proposal,
+            tally=tally,
+            outcome=outcome,
+        )
+        return self._state
+
     def resolve(self, outcome: ProposalOutcome) -> ResultProposal:
         """판정 확정을 제안 상태에 반영한다 — APPROVED/REJECTED만 허용.
 

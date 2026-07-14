@@ -23,10 +23,21 @@ description: >-
 
 termination:
   # send_message, result_proposal, vote 등 세션에서 발생한 메시지 총량.
-  max_messages: 60
+  max_messages: 30
 
-  # 세션 전체 LLM 사용량 상한 (입력+출력+캐시 읽기/쓰기 합산 — contracts.Usage).
-  token_budget: 100000
+  # 캐시 읽기를 제외한 신규 작업량 상한 (입력+출력+캐시 쓰기).
+  token_budget: 60000
+
+  # 캐시 읽기를 포함해 모델이 처리한 전체 문맥의 안전 상한.
+  processed_token_limit: 150000
+
+  # 종합을 유도하고 일반 토론을 닫는 작업 토큰 임계값.
+  synthesis_at: 25000
+  proposal_by: 40000
+
+  # 동시 호출 초과 방지 예약량과 세션당 제안 버전 상한.
+  call_reserve_tokens: 6000
+  max_proposals: 2
 
   # running 상태에서 모든 에이전트의 인박스가 비어 있고
   # LLM 호출도 없는 상태가 유지되는 최대 시간(초).
@@ -59,7 +70,7 @@ agents:
       - send_message
       - vote_result
 
-    max_turns: 25
+    max_turns: 12
 
     system_prompt: >-
       You are Research Daedeung, the research member of the Hwabaek council.
@@ -120,7 +131,7 @@ agents:
       - send_message
       - vote_result
 
-    max_turns: 25
+    max_turns: 12
 
     system_prompt: >-
       You are Critic Daedeung, the critical reviewer of the Hwabaek council.
@@ -182,7 +193,7 @@ agents:
       - send_message
       - submit_result
 
-    max_turns: 25
+    max_turns: 12
 
     system_prompt: >-
       You are Sangdaedeung, the facilitator and proposer of the Hwabaek council.

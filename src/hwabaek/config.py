@@ -31,7 +31,10 @@ from hwabaek.contracts import (
 
 # 스키마에서 허용하는 키 집합 — 여기 없는 키는 오타로 간주해 거부한다.
 _TOP_LEVEL_KEYS = {"name", "description", "default_model", "termination", "agents"}
-_TERMINATION_KEYS = {"max_messages", "token_budget", "idle_timeout", "approval"}
+_TERMINATION_KEYS = {
+    "max_messages", "token_budget", "processed_token_limit", "synthesis_at",
+    "proposal_by", "call_reserve_tokens", "max_proposals", "idle_timeout", "approval",
+}
 _AGENT_KEYS = {"name", "role", "system_prompt", "model", "max_turns", "capabilities"}
 _APPROVAL_KEYS = {"mode", "timeout_seconds", "minimum_votes"}
 
@@ -227,6 +230,21 @@ def _parse_termination(
         data, "token_budget", file_path=file_path, prefix=prefix,
         default=defaults.token_budget,
     )
+    processed_token_limit = _optional_int(
+        data, "processed_token_limit", file_path=file_path, prefix=prefix, default=None,
+    )
+    synthesis_at = _optional_int(
+        data, "synthesis_at", file_path=file_path, prefix=prefix, default=None,
+    )
+    proposal_by = _optional_int(
+        data, "proposal_by", file_path=file_path, prefix=prefix, default=None,
+    )
+    call_reserve_tokens = _optional_int(
+        data, "call_reserve_tokens", file_path=file_path, prefix=prefix, default=None,
+    )
+    max_proposals = _optional_int(
+        data, "max_proposals", file_path=file_path, prefix=prefix, default=None,
+    )
     idle_timeout = _optional_number(
         data, "idle_timeout", file_path=file_path, prefix=prefix,
         default=defaults.idle_timeout,
@@ -239,6 +257,11 @@ def _parse_termination(
         return TerminationPolicy(
             max_messages=max_messages,
             token_budget=token_budget,
+            processed_token_limit=processed_token_limit,
+            synthesis_at=synthesis_at,
+            proposal_by=proposal_by,
+            call_reserve_tokens=call_reserve_tokens,
+            max_proposals=max_proposals,
             idle_timeout=idle_timeout,
             approval=approval,
         )

@@ -14,6 +14,8 @@ from hwabaek.contracts import DEFAULT_MODEL, AgentCapability, ApprovalPolicy, Co
 # 저장소 루트 (tests/ 의 부모).
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEAM_YAML = REPO_ROOT / "configs" / "team.default.yaml"
+QUICK_TEAM_YAML = REPO_ROOT / "configs" / "team.quick.yaml"
+DEEP_TEAM_YAML = REPO_ROOT / "configs" / "team.deep.yaml"
 
 
 def _write(directory: Path, filename: str, content: str) -> Path:
@@ -58,6 +60,11 @@ default_model: gpt-custom-model
 termination:
   max_messages: 42
   token_budget: 12345
+  processed_token_limit: 30000
+  synthesis_at: 4000
+  proposal_by: 8000
+  call_reserve_tokens: 1000
+  max_proposals: 3
   idle_timeout: 5.5
   approval: majority
 agents:
@@ -79,6 +86,11 @@ agents:
         self.assertEqual(team.default_model, "gpt-custom-model")
         self.assertEqual(team.termination.max_messages, 42)
         self.assertEqual(team.termination.token_budget, 12345)
+        self.assertEqual(team.termination.processed_token_limit, 30000)
+        self.assertEqual(team.termination.synthesis_at, 4000)
+        self.assertEqual(team.termination.proposal_by, 8000)
+        self.assertEqual(team.termination.call_reserve_tokens, 1000)
+        self.assertEqual(team.termination.max_proposals, 3)
         self.assertEqual(team.termination.idle_timeout, 5.5)
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.MAJORITY)
         self.assertEqual(team.termination.approval.voting_timeout, 120.0)
@@ -92,6 +104,26 @@ agents:
         self.assertIsNone(beta.model)
         self.assertEqual(beta.max_turns, 50)
 
+    def test_budget_profiles_load_with_expected_limits(self) -> None:
+        cases = (
+            (QUICK_TEAM_YAML, "quick", 2, 25_000, 60_000, 8_000, 15_000, 2_500, 6),
+            (DEFAULT_TEAM_YAML, "default", 3, 60_000, 150_000, 25_000, 40_000, 6_000, 12),
+            (DEEP_TEAM_YAML, "deep", 3, 100_000, 250_000, 45_000, 70_000, 6_000, 18),
+        )
+        for path, name, agents, work, processed, synthesis, proposal, reserve, turns in cases:
+            with self.subTest(profile=name):
+                team = load_team_config(path)
+                policy = team.termination
+                self.assertEqual(team.name, name)
+                self.assertEqual(len(team.agents), agents)
+                self.assertEqual(policy.token_budget, work)
+                self.assertEqual(policy.effective_processed_token_limit, processed)
+                self.assertEqual(policy.effective_synthesis_at, synthesis)
+                self.assertEqual(policy.effective_proposal_by, proposal)
+                self.assertEqual(policy.effective_call_reserve_tokens, reserve)
+                self.assertEqual(policy.effective_max_proposals, 2)
+                self.assertTrue(all(agent.max_turns == turns for agent in team.agents))
+
     def test_loads_with_optional_fields_omitted_uses_contract_defaults(self) -> None:
         content = "name: minimal-team\n" + MINIMAL_AGENT_BLOCK
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,6 +135,12 @@ agents:
         self.assertEqual(team.default_model, DEFAULT_MODEL)
         self.assertEqual(team.termination.max_messages, 100)
         self.assertEqual(team.termination.token_budget, 200_000)
+        self.assertIsNone(team.termination.processed_token_limit)
+        self.assertEqual(team.termination.effective_processed_token_limit, 500_000)
+        self.assertIsNone(team.termination.synthesis_at)
+        self.assertIsNone(team.termination.proposal_by)
+        self.assertIsNone(team.termination.call_reserve_tokens)
+        self.assertIsNone(team.termination.max_proposals)
         self.assertEqual(team.termination.idle_timeout, 30.0)
         self.assertEqual(team.termination.approval.mode, ApprovalPolicy.UNANIMOUS)
         self.assertEqual(team.termination.approval.voting_timeout, 120.0)
@@ -282,8 +320,13 @@ class DefaultTeamYamlTest(unittest.TestCase):
         )
         self.assertEqual(team.termination.approval.voting_timeout, 120.0)
         self.assertEqual(team.termination.approval.minimum_votes, 1)
-        self.assertEqual(team.termination.max_messages, 60)
-        self.assertEqual(team.termination.token_budget, 100_000)
+        self.assertEqual(team.termination.max_messages, 30)
+        self.assertEqual(team.termination.token_budget, 60_000)
+        self.assertEqual(team.termination.processed_token_limit, 150_000)
+        self.assertEqual(team.termination.synthesis_at, 25_000)
+        self.assertEqual(team.termination.proposal_by, 40_000)
+        self.assertEqual(team.termination.call_reserve_tokens, 6_000)
+        self.assertEqual(team.termination.max_proposals, 2)
         self.assertEqual(team.termination.idle_timeout, 45.0)
 
     def test_default_team_yaml_agent_capabilities_and_max_turns(self) -> None:
@@ -302,10 +345,10 @@ class DefaultTeamYamlTest(unittest.TestCase):
             by_name["sangdaedeung"].capabilities,
             frozenset({AgentCapability.SEND_MESSAGE, AgentCapability.SUBMIT_RESULT}),
         )
-        # D-030: 토론+투표를 한 턴 예산 안에서 소화할 여유 (구독 모드 무과금).
-        self.assertEqual(by_name["research_daedeung"].max_turns, 25)
-        self.assertEqual(by_name["critic_daedeung"].max_turns, 25)
-        self.assertEqual(by_name["sangdaedeung"].max_turns, 25)
+        # D-032: 표준 팀의 메시지 핑퐁을 제한하면서 제안·투표 예산을 보존한다.
+        self.assertEqual(by_name["research_daedeung"].max_turns, 12)
+        self.assertEqual(by_name["critic_daedeung"].max_turns, 12)
+        self.assertEqual(by_name["sangdaedeung"].max_turns, 12)
 
 
 class LoadTeamConfigErrorCasesTest(unittest.TestCase):
@@ -554,6 +597,35 @@ agents:
             with self.assertRaises(ConfigError) as ctx:
                 load_team_config(path)
             self.assertIn("max_messages", str(ctx.exception))
+
+    def test_budget_control_type_error_raises_config_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  processed_token_limit: true\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn("processed_token_limit", str(ctx.exception))
+
+    def test_budget_control_relationship_error_wraps_contract_error(self) -> None:
+        content = (
+            "name: t\n"
+            "termination:\n"
+            "  token_budget: 100\n"
+            "  synthesis_at: 80\n"
+            "  proposal_by: 70\n"
+            + MINIMAL_AGENT_BLOCK
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(Path(tmp), "team.yaml", content)
+            with self.assertRaises(ConfigError) as ctx:
+                load_team_config(path)
+            self.assertIn("termination", str(ctx.exception))
+            self.assertIsInstance(ctx.exception.__cause__, ContractError)
 
     def test_invalid_agent_name_wraps_contract_error(self) -> None:
         # 회귀 테스트: 에이전트 이름 규칙 위반이 ContractError로 새지 않고

@@ -18,9 +18,10 @@ import itertools
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from uuid import uuid4
 
-from hwabaek.config import load_team_config
+from hwabaek.config import ConfigError, load_team_config
 from hwabaek.contracts import (
     AgentSpec,
     ApprovalConfig,
@@ -67,9 +68,12 @@ def _print_event(event: Event) -> None:
         if p.get("detail"):
             line += f" ({p['detail']})"
     elif event.type is EventType.USAGE:
-        u = p["usage"]
-        total = sum(u.values())
-        line = f"usage total={total} budget={p['token_budget']}"
+        line = (
+            f"usage work={p['work_tokens']}/{p['token_budget']} "
+            f"cache_read={p['usage']['cache_read_tokens']} "
+            f"processed={p['processed_tokens']}/{p['processed_token_limit']} "
+            f"phase={p['phase']} reserved={p['reserved_tokens']}"
+        )
     elif event.type is EventType.VOTE_STATUS:
         line = (
             f"vote proposal v{p['proposal_version']}: "
@@ -113,6 +117,19 @@ def _fake_llm_factory(task: str):
     return factory
 
 
+def _load_team(value: str) -> TeamConfig:
+    """YAML 경로 또는 내장 프로필 이름(quick/default/deep)을 로드한다."""
+    path = Path(value)
+    if path.parent == Path(".") and not path.suffix:
+        path = Path("configs") / f"team.{value}.yaml"
+        if not path.is_file():
+            raise ConfigError(
+                f"unknown team profile {value!r}; use quick, default, deep, "
+                "or pass a YAML path"
+            )
+    return load_team_config(path)
+
+
 def _real_llm_factory(auth_mode: str):
     from hwabaek.llm.base import LLMAuthError
     from hwabaek.llm.openai_client import OpenAIClient
@@ -142,7 +159,7 @@ async def _run(args: argparse.Namespace) -> int:
         team = _fake_team()
         llm_factory = _fake_llm_factory(args.task)
     else:
-        team = load_team_config(args.team)
+        team = _load_team(args.team)
         llm_factory = _real_llm_factory(args.auth)
 
     store = None
@@ -177,7 +194,11 @@ async def _run(args: argparse.Namespace) -> int:
     elif session.draft_result is not None:
         print(f"unratified draft (by {session.draft_proposer}):")
         print(session.draft_result)
-    print(f"tokens: {session.usage.total_tokens}")
+    print(
+        f"tokens: work={session.usage.work_tokens} "
+        f"cache_read={session.usage.cache_read_tokens} "
+        f"processed={session.usage.processed_tokens}"
+    )
     if store is not None:
         print(f"session {session.id} stored in {args.db}")
     return 0 if session.status is SessionStatus.COMPLETED else 1
@@ -190,8 +211,9 @@ def main() -> None:
     )
     parser.add_argument("task", help="task for the team")
     parser.add_argument(
-        "--team", default="configs/team.default.yaml",
-        help="team config yaml (default: configs/team.default.yaml)",
+        "--team", default="default",
+        help="team profile (quick|default|deep) or config yaml path "
+             "(default: default)",
     )
     parser.add_argument(
         "--fake", action="store_true",
@@ -211,7 +233,12 @@ def main() -> None:
         help="disable persistence for this run",
     )
     args = parser.parse_args()
-    sys.exit(asyncio.run(_run(args)))
+    try:
+        code = asyncio.run(_run(args))
+    except ConfigError as exc:
+        print(f"error: {exc}")
+        code = 2
+    sys.exit(code)
 
 
 if __name__ == "__main__":

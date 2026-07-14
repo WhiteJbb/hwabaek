@@ -68,12 +68,11 @@ COMMAND_SEND_MESSAGE = "send_message"
 COMMAND_SUBMIT_RESULT = "submit_result"
 COMMAND_VOTE_RESULT = "vote_result"
 
-# 상태별 허용 명령 (D-024). voting 중 일반 메시지는 허용 — 반려 사유 질의응답 등
-# 심의 논의가 화백 패턴의 핵심이며, 남용은 메시지/토큰 예산이 방어한다.
-# 종료 상태에서는 모든 명령을 거부한다(거부된 호출은 감사용 rejected event로 기록 가능).
+# 상태별 허용 명령 (D-032가 D-024 대체). voting은 표결만 허용하고
+# 종료 상태에서는 모든 명령을 거부한다(거부된 호출은 감사용 기록 가능).
 ALLOWED_COMMANDS: dict[SessionStatus, frozenset[str]] = {
     SessionStatus.RUNNING: frozenset({COMMAND_SEND_MESSAGE, COMMAND_SUBMIT_RESULT}),
-    SessionStatus.VOTING: frozenset({COMMAND_SEND_MESSAGE, COMMAND_VOTE_RESULT}),
+    SessionStatus.VOTING: frozenset({COMMAND_VOTE_RESULT}),
     SessionStatus.COMPLETED: frozenset(),
     SessionStatus.FAILED: frozenset(),
     SessionStatus.CANCELLED: frozenset(),
@@ -204,12 +203,19 @@ class Usage:
         )
 
     @property
+    def work_tokens(self) -> int:
+        """신규 작업 예산에 쓰는 합계 — 캐시 읽기는 제외한다 (D-032)."""
+        return self.input_tokens + self.output_tokens + self.cache_write_tokens
+
+    @property
+    def processed_tokens(self) -> int:
+        """모델이 처리한 전체 토큰 — 캐시 읽기를 포함한다 (D-032)."""
+        return self.work_tokens + self.cache_read_tokens
+
+    @property
     def total_tokens(self) -> int:
-        """예산(token_budget) 판정에 쓰는 합계 — 캐시 읽기/쓰기 포함 전체."""
-        return (
-            self.input_tokens + self.output_tokens
-            + self.cache_read_tokens + self.cache_write_tokens
-        )
+        """하위 호환 별칭 — 기존과 같이 캐시 읽기를 포함한 전체 처리량."""
+        return self.processed_tokens
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -400,6 +406,11 @@ class TerminationPolicy:
 
     max_messages: int = 100
     token_budget: int = 200_000
+    processed_token_limit: int | None = None
+    synthesis_at: int | None = None
+    proposal_by: int | None = None
+    call_reserve_tokens: int | None = None
+    max_proposals: int | None = None
     idle_timeout: float = 30.0
     approval: ApprovalConfig = field(default_factory=ApprovalConfig)
 
@@ -408,12 +419,83 @@ class TerminationPolicy:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ContractError(f"termination.{name} must be a positive int")
+        if self.token_budget < 3:
+            raise ContractError("termination.token_budget must be at least 3")
+        for name in (
+            "processed_token_limit", "synthesis_at", "proposal_by",
+            "call_reserve_tokens", "max_proposals",
+        ):
+            value = getattr(self, name)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ContractError(f"termination.{name} must be a positive int or null")
+        if (
+            self.processed_token_limit is not None
+            and self.processed_token_limit < self.token_budget
+        ):
+            raise ContractError(
+                "termination.processed_token_limit must be greater than or equal to "
+                "termination.token_budget"
+            )
+        synthesis = self.effective_synthesis_at
+        proposal = self.effective_proposal_by
+        if synthesis >= proposal:
+            raise ContractError(
+                "termination.synthesis_at must be less than termination.proposal_by"
+            )
+        if synthesis >= self.token_budget:
+            raise ContractError(
+                "termination.synthesis_at must be less than termination.token_budget"
+            )
+        if proposal >= self.token_budget:
+            raise ContractError(
+                "termination.proposal_by must be less than termination.token_budget"
+            )
+        if self.effective_call_reserve_tokens >= self.token_budget:
+            raise ContractError(
+                "termination.call_reserve_tokens must be less than "
+                "termination.token_budget"
+            )
         if (
             isinstance(self.idle_timeout, bool)
             or not isinstance(self.idle_timeout, (int, float))
             or self.idle_timeout <= 0
         ):
             raise ContractError("termination.idle_timeout must be a positive number")
+
+    @property
+    def effective_processed_token_limit(self) -> int:
+        """명시 상한 또는 작업 예산의 2.5배인 전체 처리 상한."""
+        if self.processed_token_limit is not None:
+            return self.processed_token_limit
+        return self.token_budget * 5 // 2
+
+    @property
+    def effective_synthesis_at(self) -> int:
+        """명시 임계값 또는 작업 예산 5/12 지점의 종합 시작선."""
+        if self.synthesis_at is not None:
+            return self.synthesis_at
+        return max(1, self.token_budget * 5 // 12)
+
+    @property
+    def effective_proposal_by(self) -> int:
+        """명시 임계값 또는 작업 예산 2/3 지점의 제안 강제선."""
+        if self.proposal_by is not None:
+            return self.proposal_by
+        return max(self.effective_synthesis_at + 1, self.token_budget * 2 // 3)
+
+    @property
+    def effective_call_reserve_tokens(self) -> int:
+        """명시 예약량 또는 작업 예산 10% 이하, 최대 6천 토큰."""
+        if self.call_reserve_tokens is not None:
+            return self.call_reserve_tokens
+        return min(6_000, max(1, self.token_budget // 10))
+
+    @property
+    def effective_max_proposals(self) -> int:
+        """명시 제안 수 또는 기본 2개 버전."""
+        return self.max_proposals if self.max_proposals is not None else 2
 
 
 @dataclass(frozen=True)
@@ -970,6 +1052,10 @@ def make_usage_event(
     token_budget: int,
     created_at: str,
     per_agent: dict[str, Usage] | None = None,
+    *,
+    processed_token_limit: int | None = None,
+    phase: str | None = None,
+    reserved_tokens: int = 0,
 ) -> Event:
     """usage는 세션 누적치, per_agent는 에이전트별 누적치 전체 맵.
 
@@ -985,6 +1071,11 @@ def make_usage_event(
         payload={
             "usage": usage.to_dict(),
             "token_budget": token_budget,
+            "work_tokens": usage.work_tokens,
+            "processed_tokens": usage.processed_tokens,
+            "processed_token_limit": processed_token_limit,
+            "phase": phase,
+            "reserved_tokens": reserved_tokens,
             "per_agent": {
                 name: agent_usage.to_dict()
                 for name, agent_usage in sorted((per_agent or {}).items())

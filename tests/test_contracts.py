@@ -91,9 +91,11 @@ class TestUsage(unittest.TestCase):
         with self.assertRaises(TypeError):
             _ = Usage() + 5
 
-    def test_total_tokens_sums_all_four_fields(self) -> None:
-        # total_tokens는 캐시 읽기/쓰기 포함 전체 합.
+    def test_work_and_processed_token_totals(self) -> None:
+        # 작업량은 캐시 읽기를 제외하고, 처리량과 구형 별칭은 이를 포함한다.
         u = Usage(input_tokens=1, output_tokens=2, cache_read_tokens=4, cache_write_tokens=8)
+        self.assertEqual(u.work_tokens, 11)
+        self.assertEqual(u.processed_tokens, 15)
         self.assertEqual(u.total_tokens, 15)
 
     def test_to_from_dict_roundtrip(self) -> None:
@@ -414,6 +416,65 @@ class TestTerminationPolicy(unittest.TestCase):
         self.assertEqual(p.approval.mode, ApprovalPolicy.UNANIMOUS)
         self.assertGreater(p.max_messages, 0)
 
+    def test_budget_control_defaults_are_derived_from_work_budget(self) -> None:
+        p = TerminationPolicy(token_budget=60_000)
+        self.assertIsNone(p.processed_token_limit)
+        self.assertIsNone(p.synthesis_at)
+        self.assertIsNone(p.proposal_by)
+        self.assertIsNone(p.call_reserve_tokens)
+        self.assertIsNone(p.max_proposals)
+        self.assertEqual(p.effective_processed_token_limit, 150_000)
+        self.assertEqual(p.effective_synthesis_at, 25_000)
+        self.assertEqual(p.effective_proposal_by, 40_000)
+        self.assertEqual(p.effective_call_reserve_tokens, 6_000)
+        self.assertEqual(p.effective_max_proposals, 2)
+
+    def test_explicit_budget_controls_override_derived_values(self) -> None:
+        p = TerminationPolicy(
+            token_budget=100,
+            processed_token_limit=300,
+            synthesis_at=20,
+            proposal_by=70,
+            call_reserve_tokens=5,
+            max_proposals=3,
+        )
+        self.assertEqual(p.effective_processed_token_limit, 300)
+        self.assertEqual(p.effective_synthesis_at, 20)
+        self.assertEqual(p.effective_proposal_by, 70)
+        self.assertEqual(p.effective_call_reserve_tokens, 5)
+        self.assertEqual(p.effective_max_proposals, 3)
+
+    def test_optional_budget_controls_are_positive_int_or_null(self) -> None:
+        fields = (
+            "processed_token_limit", "synthesis_at", "proposal_by",
+            "call_reserve_tokens", "max_proposals",
+        )
+        for field_name in fields:
+            for bad in (0, -1, True, 1.5, "1"):
+                with self.subTest(field=field_name, bad=bad):
+                    with self.assertRaises(ContractError):
+                        TerminationPolicy(**{field_name: bad})
+
+    def test_budget_control_cross_field_validation(self) -> None:
+        invalid = (
+            {"token_budget": 100, "processed_token_limit": 99},
+            {"token_budget": 100, "synthesis_at": 70, "proposal_by": 70},
+            {"token_budget": 100, "synthesis_at": 80, "proposal_by": 70},
+            {"token_budget": 100, "synthesis_at": 100},
+            {"token_budget": 100, "proposal_by": 100},
+            {"token_budget": 100, "call_reserve_tokens": 100},
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ContractError):
+                    TerminationPolicy(**kwargs)
+
+    def test_tiny_valid_budget_derived_thresholds_remain_ordered(self) -> None:
+        p = TerminationPolicy(token_budget=3)
+        self.assertEqual(p.effective_synthesis_at, 1)
+        self.assertEqual(p.effective_proposal_by, 2)
+        self.assertEqual(p.effective_call_reserve_tokens, 1)
+
     def test_max_messages_positive_int(self) -> None:
         for bad in (0, -1):
             with self.subTest(bad=bad):
@@ -421,7 +482,7 @@ class TestTerminationPolicy(unittest.TestCase):
                     TerminationPolicy(max_messages=bad)
 
     def test_token_budget_positive_int(self) -> None:
-        for bad in (0, -100):
+        for bad in (0, -100, 1, 2):
             with self.subTest(bad=bad):
                 with self.assertRaises(ContractError):
                     TerminationPolicy(token_budget=bad)
@@ -1061,7 +1122,7 @@ class TestFailReason(unittest.TestCase):
 
 
 class TestAllowedCommands(unittest.TestCase):
-    # D-024: running={send_message, submit_result}, voting={send_message, vote_result},
+    # D-032: running={send_message, submit_result}, voting={vote_result},
     # 종료 상태 3종은 빈 집합.
     def test_running(self) -> None:
         self.assertEqual(
@@ -1072,7 +1133,7 @@ class TestAllowedCommands(unittest.TestCase):
     def test_voting(self) -> None:
         self.assertEqual(
             allowed_commands(SessionStatus.VOTING),
-            frozenset({COMMAND_SEND_MESSAGE, COMMAND_VOTE_RESULT}),
+            frozenset({COMMAND_VOTE_RESULT}),
         )
 
     def test_terminal_states_empty(self) -> None:
@@ -1387,7 +1448,16 @@ class TestMakeEventHelpers(unittest.TestCase):
         self.assertEqual(e.type, EventType.USAGE)
         self.assertEqual(
             e.payload,
-            {"usage": u.to_dict(), "token_budget": 200000, "per_agent": {}},
+            {
+                "usage": u.to_dict(),
+                "token_budget": 200000,
+                "work_tokens": 150,
+                "processed_tokens": 150,
+                "processed_token_limit": None,
+                "phase": None,
+                "reserved_tokens": 0,
+                "per_agent": {},
+            },
         )
 
     def test_vote_status_event_includes_version_and_sorts_members(self) -> None:

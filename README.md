@@ -25,16 +25,18 @@
    `send_message` 도구로 서로 메시지를 주고받으며 협업합니다.
 3. 협업 과정은 대시보드의 메시지 타임라인에 실시간(SSE)으로 표시됩니다.
 4. 어느 에이전트가 `submit_result`로 초안을 제출하면 다른 에이전트들이 승인/반대를
-   투표합니다(**화백 합의** — 기본은 생존 심의자 전원 승인의 엄밀한 만장일치, 미투표는
-   승인으로 치지 않음). 승인되면 최종 결과와 함께 세션이 종료되고, 반려되면 사유와
-   함께 논의가 재개됩니다(재제출은 버전이 오른 새 제안).
+   투표합니다(**화백 합의** — 기본은 실제 참여한 심의자 전원 승인 + 최소 1표,
+   미투표는 승인으로 치지 않음). 승인되면 최종 결과와 함께 세션이 종료되고,
+   반려되면 원 제출자가 사유를 반영해 한 번 수정합니다.
 
 ### 종료 안전장치
 
 자율 협업 패턴의 최대 위험(무한 대화, 비용 폭증)을 시스템 차원에서 차단합니다.
 
 - `submit_result` 제출 + 합의 승인 시 정상 종료 (투표 중에도 예산 상한 유지)
-- 세션 총 메시지 수 상한 / 토큰 예산 초과 시 강제 종료
+- 캐시 읽기를 제외한 작업 예산과 캐시를 포함한 전체 처리 상한을 별도로 강제
+- 종합 → 제안 → 투표 → 수정 단계로 허용 호출과 도구를 좁혀 결론 없는 대화를 차단
+- 호출 전 토큰 예약, 메시지·에이전트 턴·제안 버전 상한
 - 모든 에이전트 유휴 시 종료
 - 대시보드에서 언제든 취소 가능 (취소 후 추가 API 호출 없음)
 
@@ -55,19 +57,24 @@ name: default            # 팀 식별자 (소문자/숫자/_/-)
 description: ...         # 선택
 default_model: ...       # 선택 — 생략 시 계약 기본값(GPT-5.6 Terra)
 termination:             # 종료 정책 (전부 선택)
-  max_messages: 100      # 세션 메시지 상한
-  token_budget: 200000   # 세션 토큰 예산
-  idle_timeout: 30       # 전원 유휴 판정 시간(초) — running 전용
+  max_messages: 30       # 세션 메시지 상한
+  token_budget: 60000    # 작업 예산(최소 3): input + output + cache_write
+  processed_token_limit: 150000 # 전체 처리 상한: 작업 + cache_read
+  synthesis_at: 25000    # 종합 유도 시작점
+  proposal_by: 40000     # 일반 토론을 닫고 제안을 우선하는 지점
+  call_reserve_tokens: 6000 # 동시 호출 전 예약량
+  max_proposals: 2       # 최초 제안 + 최대 한 차례 수정
+  idle_timeout: 45       # 전원 유휴 판정 시간(초) — running 전용
   approval:              # 화백 합의 설정 (문자열 축약형 `approval: unanimous`도 지원)
-    mode: unanimous      # unanimous | majority | participating_unanimous | first
+    mode: participating_unanimous # unanimous | majority | participating_unanimous | first
     timeout_seconds: 120 # 투표 대기 시간 — idle_timeout과 별개의 voting 전용 타이머
-    minimum_votes: null  # participating_unanimous 전용 유효 투표 하한
+    minimum_votes: 1     # participating_unanimous 전용 유효 투표 하한
 agents:                  # 1명 이상
   - name: sangdaedeung   # 필수
     role: ...            # 필수 — 대시보드 표시용
     system_prompt: ...   # 필수
     model: ...           # 선택 — 에이전트별 오버라이드
-    max_turns: 50        # 선택 — 에이전트당 LLM 호출 상한
+    max_turns: 12        # 선택 — 에이전트당 LLM 호출 상한
     capabilities:        # 선택 — 생략 시 전체. 런타임이 권한 밖 호출을 거부 (D-027)
       - send_message     #   send_message | submit_result | vote_result
       - submit_result
@@ -75,7 +82,13 @@ agents:                  # 1명 이상
 
 기본 팀은 화백 컨셉의 **대등 3인 구조**입니다 — 조사 대등(research_daedeung),
 견제 대등(critic_daedeung), 상대등(sangdaedeung, 진행·종합·제출). 상대등이 제출한
-안을 나머지 두 대등이 모두 승인해야 의결됩니다.
+안은 나머지 두 대등 중 최소 1명이 투표하고, 실제 투표한 심의자 전원이 승인해야
+의결됩니다.
+
+내장 프로필은 `quick`(2인, 작업 25k), `default`(Standard 3인, 작업 60k),
+`deep`(3인, 작업 100k)입니다. 짧고 되돌리기 쉬운 선택은 Quick, 일반 기술
+의사결정은 Standard, 보안·아키텍처처럼 비가역적이거나 고위험인 안건은 Deep이
+적합합니다. 프로필 이름은 대시보드나 `--team`에서 선택합니다.
 
 허용되지 않은 키는 오타로 간주해 로드 시 즉시 거부됩니다(파일·필드 경로를 포함한
 오류 메시지). 대시보드가 구독하는 이벤트 스트림 계약은
@@ -91,7 +104,7 @@ agents:                  # 1명 이상
 | M2b | 영속화(SQLite) + subscription OAuth 모드 + 실 API 스모크 | ✅ 완료 |
 | M3 | 서버 (FastAPI REST + SSE) | ✅ 완료 |
 | M4 | 웹 대시보드 | ✅ 완료 |
-| M5 | 견고화 (실패 경로, E2E) | 예정 |
+| M5 | 견고화 (예산·수렴 제어 구현, 실안건 튜닝/E2E 후속) | 🚧 진행 중 |
 | M6 | 확장 실험 (외부 워커, 도구, 도트 월드 UI) | 후순위 |
 
 상세 계획은 [docs/Plan.md](docs/Plan.md) 참조.
@@ -113,6 +126,9 @@ agents:                  # 1명 이상
 
 # 실제 실행 — OPENAI_API_KEY 필요 (기본 팀: configs/team.default.yaml)
 .venv\Scripts\python.exe -m hwabaek.run "your task"
+
+# 내장 예산 프로필 선택 (quick | default | deep, YAML 경로도 허용)
+.venv\Scripts\python.exe -m hwabaek.run "your task" --team quick
 
 # ChatGPT 구독(OAuth) 모드 — 최초 1회 로그인 후 사용 (D-026, 실험적)
 .venv\Scripts\python.exe -m hwabaek.llm.chatgpt_auth login
@@ -180,7 +196,7 @@ curl.exe -N -H 'Last-Event-ID: 1' "http://127.0.0.1:8000/sessions/$sessionId/eve
 | `GET /sessions?limit=50` | 200 `{"sessions": [...]}` (`limit` 1~200 보정) | — |
 | `GET /sessions/{id}` | 200 `{"session": ..., "team": ..., "messages": [...], "proposals": [...], "votes": [...]}` | 없음 404 |
 | `POST /sessions/{id}/cancel` | 200, 평면 Session | 없음 404, 종료 세션 409 |
-| `GET /teams` | 200 `{"teams": [...]}` | 설정 오류 400 |
+| `GET /teams` | 200 `{"default_team": "...", "teams": [...]}` | 설정 오류 400 |
 | `GET /sessions/{id}/events` | 200 SSE; 종료 세션은 backlog 후 연결 종료 | 잘못된 `Last-Event-ID` 400, 없음 404 |
 
 SSE의 정확한 와이어 형식과 재구독 규칙은
@@ -206,8 +222,9 @@ py -m venv .venv
 - chatgpt_oauth 모드 고지 (실험적):
   - OpenAI가 공식 보장하지 않는 경로입니다 — 약관 변경 시 예고 없이 제거될 수
     있습니다 (Anthropic·Google이 동일 경로를 차단한 전례 있음).
-  - 구독 백엔드는 `max_output_tokens`를 거부하므로 토큰 예산은 **사후 집계로만**
-    강제됩니다 — 응답 1건이 예산을 초과해 끝날 수 있습니다.
+  - 구독 백엔드는 `max_output_tokens`를 거부합니다. 런타임은 호출 전에 예산을
+    예약하고 응답 후 실제 사용량을 정산하지만, 응답 1건이 예약량보다 크면 상한을
+    초과한 뒤 `failed (budget)`로 끝날 수 있습니다.
   - 실계정 검증 완료 (2026-07-14): gpt-5.6-terra 구독 백엔드 동작 확인.
     백엔드가 `store=false`·`stream=true`를 강제하고 명시적 프롬프트 캐시
     breakpoint를 거부하므로, 어댑터가 내부적으로 스트리밍을 집계하며 이 모드에서는

@@ -179,6 +179,62 @@ class MessageBusTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.done())
         self.assertIsNone(task.exception())
 
+    async def test_notice_wakes_waiter_without_posting_domain_message(self) -> None:
+        delivered: list = []
+        bus = self._make_bus(on_message=delivered.append)
+        entered = asyncio.Event()
+
+        async def waiter() -> None:
+            entered.set()
+            await bus.wait_for_messages("bob")
+
+        task = asyncio.create_task(waiter())
+        await entered.wait()
+        self.assertFalse(task.done())
+
+        bus.post_notice("bob", "prepare the proposal")
+        await asyncio.wait_for(task, timeout=1.0)
+
+        self.assertEqual(bus.pending_count("bob"), 1)
+        self.assertEqual(bus.total_posted(), 0)
+        self.assertEqual(delivered, [])
+        self.assertEqual(bus.drain_notices("bob"), ["prepare the proposal"])
+        self.assertEqual(bus.pending_count("bob"), 0)
+
+    async def test_wait_returns_immediately_when_notice_present(self) -> None:
+        bus = self._make_bus()
+        bus.post_notice("bob", "synthesize now")
+        await asyncio.wait_for(bus.wait_for_messages("bob"), timeout=1.0)
+
+    async def test_notice_drain_preserves_order(self) -> None:
+        bus = self._make_bus()
+        bus.post_notice("bob", "first")
+        bus.post_notice("bob", "second")
+        self.assertEqual(bus.drain_notices("bob"), ["first", "second"])
+        self.assertEqual(bus.drain_notices("bob"), [])
+
+    async def test_shared_wake_stays_set_until_messages_and_notices_drained(self) -> None:
+        bus = self._make_bus()
+        self._chat(bus, "alice", ("bob",), "domain")
+        bus.post_notice("bob", "control")
+
+        self.assertEqual(bus.pending_count("bob"), 2)
+        self.assertEqual(len(bus.drain("bob")), 1)
+        self.assertEqual(bus.pending_count("bob"), 1)
+        # 메시지만 비운 뒤에도 남은 알림 때문에 즉시 반환한다.
+        await asyncio.wait_for(bus.wait_for_messages("bob"), timeout=1.0)
+
+        self.assertEqual(bus.drain_notices("bob"), ["control"])
+        self.assertEqual(bus.pending_count("bob"), 0)
+
+        # 반대 순서로 비워도 메시지가 남아 있는 동안 즉시 반환해야 한다.
+        bus.post_notice("bob", "control-2")
+        self._chat(bus, "alice", ("bob",), "domain-2")
+        self.assertEqual(bus.drain_notices("bob"), ["control-2"])
+        await asyncio.wait_for(bus.wait_for_messages("bob"), timeout=1.0)
+        self.assertEqual(len(bus.drain("bob")), 1)
+        self.assertEqual(bus.pending_count("bob"), 0)
+
     async def test_wait_propagates_cancellation(self) -> None:
         bus = self._make_bus()
         entered = asyncio.Event()
@@ -230,6 +286,31 @@ class MessageBusTest(unittest.IsolatedAsyncioTestCase):
             bus.pending_count("ghost")
         with self.assertRaises(ContractError):
             await bus.wait_for_messages("ghost")
+        with self.assertRaises(ContractError):
+            bus.post_notice("ghost", "control")
+        with self.assertRaises(ContractError):
+            bus.drain_notices("ghost")
+
+    async def test_empty_notice_is_rejected_without_side_effects(self) -> None:
+        delivered: list = []
+        bus = self._make_bus(on_message=delivered.append)
+        with self.assertRaises(ContractError):
+            bus.post_notice("bob", "")
+        self.assertEqual(bus.pending_count("bob"), 0)
+        self.assertEqual(bus.total_posted(), 0)
+        self.assertEqual(delivered, [])
+
+    async def test_deactivated_agent_drops_pending_and_future_delivery(self) -> None:
+        bus = self._make_bus()
+        self._chat(bus, "alice", ("bob",))
+        bus.post_notice("bob", "control")
+        bus.deactivate("bob")
+
+        self.assertEqual(bus.pending_count("bob"), 0)
+        self._chat(bus, "carol", ("bob",))
+        self._chat(bus, "carol", (BROADCAST,))
+        bus.post_notice("bob", "late control")
+        self.assertEqual(bus.pending_count("bob"), 0)
 
     # ------------------------------------------------------------------
     # total_posted / pending_count

@@ -18,6 +18,7 @@ Plan 코어 의미론 §3~§7을 구현한다:
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from collections.abc import Callable, Coroutine
 
@@ -53,6 +54,16 @@ from hwabaek.contracts import (
 )
 from hwabaek.llm.base import LLMClient, LLMError
 from hwabaek.store.base import Store
+
+
+class BudgetPhase(str, enum.Enum):
+    """D-032 내부 예산 단계. SessionStatus 와이어 계약은 그대로 유지한다."""
+
+    DISCUSSION = "discussion"
+    SYNTHESIS = "synthesis"
+    PROPOSAL = "proposal"
+    VOTING = "voting"
+    REVISION = "revision"
 
 
 class SessionManager:
@@ -111,6 +122,20 @@ class SessionManager:
         self._done = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
         self._vote_deadline: float | None = None
+        self._budget_phase = BudgetPhase.DISCUSSION
+        self._budget_condition = asyncio.Condition()
+        self._call_reservations: dict[str, int] = {}
+        self._call_phases: dict[str, BudgetPhase] = {}
+        self._voting_attempts: dict[tuple[str, str], int] = {}
+        self._decision_attempts: dict[tuple[BudgetPhase, int, str], int] = {}
+        self._decision_unresponsive: set[str] = set()
+        self._proposal_count = 0
+        self._revision_proposer: str | None = None
+        self._exhausted_agents: set[str] = set()
+        self._proposers = frozenset(
+            spec.name for spec in team.agents
+            if AgentCapability.SUBMIT_RESULT in spec.capabilities
+        )
         self._last_activity: float = 0.0
         self._rejected_commands: list[str] = []  # 종료 후 거부된 명령의 감사 기록
         self._store = store
@@ -127,6 +152,10 @@ class SessionManager:
     @property
     def rejected_commands(self) -> tuple[str, ...]:
         return tuple(self._rejected_commands)
+
+    @property
+    def budget_phase(self) -> BudgetPhase:
+        return self._budget_phase
 
     async def run(self) -> Session:
         """에이전트 기동 → 종료 조건 도달까지 조정 → 종료 상태 Session 반환."""
@@ -232,11 +261,282 @@ class SessionManager:
             self._enqueue_write(lambda: self._store.save_proposal(proposal))
 
     # ------------------------------------------------------------------
+    # D-032 호출 예약·예산 단계
+    # ------------------------------------------------------------------
+
+    def _set_budget_phase(self, phase: BudgetPhase) -> None:
+        """단계를 단조 전환하고 필요한 에이전트를 제어 알림으로 깨운다."""
+        if phase is self._budget_phase:
+            return
+        self._budget_phase = phase
+        if phase in (BudgetPhase.SYNTHESIS, BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
+            if phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
+                self._decision_unresponsive.clear()
+            instructions = {
+                BudgetPhase.SYNTHESIS: (
+                    "[budget phase: synthesis] Consolidate the discussion now. "
+                    "Resolve only material gaps and prepare a result proposal soon."
+                ),
+                BudgetPhase.PROPOSAL: (
+                    "[budget phase: proposal] The discussion budget is closed. "
+                    "Submit the best supported result now with submit_result."
+                ),
+                BudgetPhase.REVISION: (
+                    "[budget phase: revision] Revise the rejected proposal from the "
+                    "recorded reasons and submit one final version now."
+                ),
+            }
+            recipients = (
+                frozenset({self._revision_proposer})
+                if phase is BudgetPhase.REVISION and self._revision_proposer is not None
+                else self._proposers
+            ) - self._exhausted_agents
+            if not recipients:
+                self._emit_usage_snapshot()
+                self._finalize(
+                    SessionStatus.FAILED,
+                    fail_reason=FailReason.BUDGET,
+                    fail_detail="no proposer calls remain for decision phase",
+                )
+                return
+            for proposer in recipients:
+                self._bus.post_notice(proposer, instructions[phase])
+
+    def _sync_budget_phase(self) -> None:
+        """현재 상태와 정산된 실제 작업량으로 내부 단계를 전진시킨다."""
+        if self._session.status is SessionStatus.VOTING:
+            self._set_budget_phase(BudgetPhase.VOTING)
+            return
+        if self._budget_phase is BudgetPhase.REVISION:
+            return
+        work = self._session.usage.work_tokens
+        policy = self._team.termination
+        if work >= policy.effective_proposal_by:
+            self._set_budget_phase(BudgetPhase.PROPOSAL)
+        elif work >= policy.effective_synthesis_at:
+            self._set_budget_phase(BudgetPhase.SYNTHESIS)
+
+    def _phase_allows_agent(self, agent: str) -> bool:
+        if agent in self._exhausted_agents:
+            return False
+        if self._budget_phase is BudgetPhase.REVISION:
+            return (
+                agent == self._revision_proposer
+                and agent not in self._decision_unresponsive
+            )
+        if self._budget_phase is BudgetPhase.PROPOSAL:
+            return (
+                agent in self._proposers
+                and agent not in self._decision_unresponsive
+            )
+        if self._budget_phase is BudgetPhase.VOTING:
+            active = self._consensus.active
+            return active is not None and agent in active.tally.pending
+        return True
+
+    async def _before_agent_call(self, agent: str) -> bool:
+        """호출 전 예약을 원자적으로 잡는다. 진행 중 예약은 정산까지 기다린다."""
+        policy = self._team.termination
+        reserve = policy.effective_call_reserve_tokens
+        async with self._budget_condition:
+            while not self._session.is_terminal:
+                projected = (
+                    self._session.usage.work_tokens
+                    + sum(self._call_reservations.values())
+                )
+                self._sync_budget_phase()
+                if not self._phase_allows_agent(agent):
+                    return False
+
+                work_fits = projected + reserve <= policy.token_budget
+                processed_projected = (
+                    self._session.usage.processed_tokens
+                    + sum(self._call_reservations.values())
+                )
+                processed_fits = (
+                    processed_projected + reserve
+                    <= policy.effective_processed_token_limit
+                )
+                if work_fits and processed_fits:
+                    if self._budget_phase is BudgetPhase.VOTING:
+                        active = self._consensus.active
+                        assert active is not None
+                        key = (active.proposal.id, agent)
+                        attempts = self._voting_attempts.get(key, 0)
+                        if attempts >= 2:
+                            self._abstain_voter(agent)
+                            return False
+                        self._voting_attempts[key] = attempts + 1
+                    elif self._budget_phase in (
+                        BudgetPhase.PROPOSAL, BudgetPhase.REVISION
+                    ):
+                        key = (self._budget_phase, self._proposal_count, agent)
+                        attempts = self._decision_attempts.get(key, 0)
+                        if attempts >= 2:
+                            self._mark_decision_unresponsive(agent)
+                            return False
+                        self._decision_attempts[key] = attempts + 1
+                    self._call_reservations[agent] = reserve
+                    self._call_phases[agent] = self._budget_phase
+                    return True
+
+                if self._call_reservations:
+                    await self._budget_condition.wait()
+                    continue
+                detail = (
+                    "processed token limit reached before next call"
+                    if not processed_fits
+                    else "work token budget reserved for decision phase"
+                )
+                self._finalize(
+                    SessionStatus.FAILED,
+                    fail_reason=FailReason.BUDGET,
+                    fail_detail=detail,
+                )
+                return False
+        return False
+
+    async def _after_agent_call(self, agent: str, usage: Usage) -> None:
+        """예약을 실제 사용량으로 정산한 뒤 대기 호출을 깨운다."""
+        async with self._budget_condition:
+            self._call_reservations.pop(agent, None)
+            self._on_agent_usage(agent, usage)
+            self._budget_condition.notify_all()
+
+    async def _release_agent_call(self, agent: str) -> None:
+        """오류·취소된 호출의 예약을 누수 없이 반환한다."""
+        async with self._budget_condition:
+            self._call_reservations.pop(agent, None)
+            self._budget_condition.notify_all()
+
+    def _tools_for_agent(self, agent: str) -> frozenset[str]:
+        capabilities = frozenset(c.value for c in self._specs[agent].capabilities)
+        phase = self._call_phases.get(agent, self._budget_phase)
+        if phase is BudgetPhase.VOTING:
+            return capabilities & frozenset({"vote_result"})
+        if phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
+            return capabilities & frozenset({"submit_result"})
+        return capabilities
+
+    def _instruction_for_agent(self, agent: str) -> str | None:
+        phase = self._call_phases.get(agent, self._budget_phase)
+        if phase is BudgetPhase.SYNTHESIS:
+            if agent in self._proposers:
+                return (
+                    "[budget phase: synthesis] Prepare and submit a concise result "
+                    "proposal after resolving only material remaining gaps."
+                )
+            return (
+                "[budget phase: synthesis] Send at most one concise message containing "
+                "only unresolved material evidence or objections."
+            )
+        if phase is BudgetPhase.PROPOSAL:
+            return (
+                "[budget phase: proposal] General discussion is closed. Call "
+                "submit_result now with the best supported deliverable."
+            )
+        if phase is BudgetPhase.REVISION:
+            return (
+                "[budget phase: revision] Address the recorded rejection reasons and "
+                "call submit_result with the final revised deliverable."
+            )
+        if phase is BudgetPhase.VOTING:
+            return (
+                "[budget phase: voting] General chat is closed. Review the active "
+                "proposal and call vote_result now."
+            )
+        return None
+
+    def _retry_instruction_for_agent(self, agent: str) -> str | None:
+        if self._budget_phase is BudgetPhase.VOTING:
+            active = self._consensus.active
+            if active is None or agent not in active.tally.pending:
+                return None
+            key = (active.proposal.id, agent)
+            if self._voting_attempts.get(key, 0) < 2:
+                return (
+                    "[action required] Your response did not record a vote. Call "
+                    "vote_result now; ordinary text does not count as a vote."
+                )
+            self._abstain_voter(agent)
+            return None
+        if self._budget_phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
+            key = (self._budget_phase, self._proposal_count, agent)
+            if self._decision_attempts.get(key, 0) < 2:
+                return (
+                    "[action required] Your response did not submit a result. Call "
+                    "submit_result now; ordinary text does not count as a proposal."
+                )
+            self._mark_decision_unresponsive(agent)
+        return None
+
+    def _mark_decision_unresponsive(self, agent: str) -> None:
+        self._decision_unresponsive.add(agent)
+        if self._budget_phase is BudgetPhase.REVISION:
+            remaining = (
+                frozenset({self._revision_proposer})
+                if self._revision_proposer is not None else frozenset()
+            )
+        else:
+            remaining = self._proposers
+        remaining -= self._exhausted_agents | self._decision_unresponsive
+        if not remaining:
+            self._finalize(
+                SessionStatus.FAILED,
+                fail_reason=FailReason.BUDGET,
+                fail_detail="proposer did not submit within decision call limit",
+            )
+
+    def _abstain_voter(self, agent: str) -> None:
+        state = self._consensus.register_abstention(agent)
+        if state is not None:
+            self._emit_vote_status(state)
+            self._apply_outcome(state)
+
+    def _on_agent_exhausted(self, agent: str) -> None:
+        """호출 상한을 소진한 에이전트를 큐와 향후 단계 대상에서 제외한다."""
+        if agent in self._exhausted_agents:
+            return
+        self._exhausted_agents.add(agent)
+        self._bus.deactivate(agent)
+        if self._session.is_terminal:
+            return
+        if self._session.status is SessionStatus.VOTING:
+            self._abstain_voter(agent)
+            return
+        if self._budget_phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION):
+            if not (self._proposers - self._exhausted_agents):
+                self._finalize(
+                    SessionStatus.FAILED,
+                    fail_reason=FailReason.BUDGET,
+                    fail_detail="no proposer calls remain for decision phase",
+                )
+
+    # ------------------------------------------------------------------
     # 명령 처리 (에이전트 → 세션) — 상태별 허용 규칙 §17
     # ------------------------------------------------------------------
 
     def _guard(self, command: str, sender: str) -> None:
         """상태별 허용 규칙(§17) + 에이전트별 권한(D-027)의 이중 검증."""
+        if self._session.status is SessionStatus.VOTING and command == "send_message":
+            raise ToolError(
+                "send_message rejected: voting phase only allows vote_result"
+            )
+        if (
+            self._budget_phase is BudgetPhase.REVISION
+            and command == "submit_result"
+            and sender != self._revision_proposer
+        ):
+            raise ToolError(
+                "submit_result rejected: only the original proposer may revise"
+            )
+        if (
+            self._budget_phase in (BudgetPhase.PROPOSAL, BudgetPhase.REVISION)
+            and command == "send_message"
+        ):
+            raise ToolError(
+                "send_message rejected: proposal phase only allows submit_result"
+            )
         allowed = allowed_commands(self._session.status)
         if command not in allowed:
             note = f"{command} rejected: session is {self._session.status.value}"
@@ -283,17 +583,21 @@ class SessionManager:
 
     def submit_result(self, sender: str, content: str) -> str:
         self._guard("submit_result", sender)
+        if self._proposal_count >= self._team.termination.effective_max_proposals:
+            raise ToolError("submit_result rejected: maximum proposal versions reached")
         # 심의자 스냅샷 자격 = 생존 ∧ vote_result 권한 (D-018/D-027) — 투표할 수
         # 없는 에이전트를 심의자로 넣으면 unanimous가 항상 no_quorum이 된다.
         alive = frozenset(
             name for name, state in self._agent_states.items()
             if state is not AgentState.DEAD
+            and name not in self._exhausted_agents
             and AgentCapability.VOTE_RESULT in self._specs[name].capabilities
         )
         try:
             state = self._consensus.open_proposal(sender, content, alive)
         except ConsensusError as error:
             raise ToolError(str(error)) from error
+        self._proposal_count += 1
         self._persist_proposal(state.proposal)
         superseded = self._consensus.last_superseded
         if superseded is not None:
@@ -306,6 +610,8 @@ class SessionManager:
             proposal_id=state.proposal.id,
         )
         self._transition(SessionStatus.VOTING)
+        self._set_budget_phase(BudgetPhase.VOTING)
+        self._emit_usage_snapshot()
         self._vote_deadline = (
             asyncio.get_running_loop().time()
             + self._team.termination.approval.voting_timeout
@@ -385,9 +691,21 @@ class SessionManager:
             self._complete(state)
         elif state.outcome is ProposalOutcome.REJECTED:
             rejected = self._consensus.resolve(ProposalOutcome.REJECTED)
+            self._revision_proposer = rejected.proposer
             self._persist_proposal(rejected)
             self._vote_deadline = None
-            self._transition(SessionStatus.RUNNING)
+            if rejected.version >= self._team.termination.effective_max_proposals:
+                self._finalize(
+                    SessionStatus.FAILED,
+                    fail_reason=FailReason.NO_QUORUM,
+                    fail_detail="maximum proposal versions rejected",
+                    draft=rejected,
+                )
+            else:
+                self._transition(SessionStatus.RUNNING)
+                self._set_budget_phase(BudgetPhase.REVISION)
+                if not self._session.is_terminal:
+                    self._emit_usage_snapshot()
         else:  # NO_QUORUM
             proposal = self._consensus.resolve(ProposalOutcome.NO_QUORUM)
             self._persist_proposal(proposal)
@@ -529,13 +847,35 @@ class SessionManager:
         self._per_agent_usage[agent] = (
             self._per_agent_usage.get(agent, Usage()) + usage
         )
+        self._sync_budget_phase()
+        if self._session.is_terminal:
+            return
+        policy = self._team.termination
+        self._emit_usage_snapshot()
+        if self._session.usage.work_tokens > policy.token_budget:
+            self._finalize(
+                SessionStatus.FAILED,
+                fail_reason=FailReason.BUDGET,
+                fail_detail="work token budget exceeded",
+            )
+        elif self._session.usage.processed_tokens > policy.effective_processed_token_limit:
+            self._finalize(
+                SessionStatus.FAILED,
+                fail_reason=FailReason.BUDGET,
+                fail_detail="processed token limit exceeded",
+            )
+
+    def _emit_usage_snapshot(self) -> None:
+        """현재 누적 사용량과 내부 예산 단계를 하나의 usage 이벤트로 발행한다."""
+        policy = self._team.termination
         self._emit(make_usage_event(
             self._id_factory(), self._next_seq(), self._session.id,
-            self._session.usage, self._team.termination.token_budget,
+            self._session.usage, policy.token_budget,
             self._clock(), per_agent=dict(self._per_agent_usage),
+            processed_token_limit=policy.effective_processed_token_limit,
+            phase=self._budget_phase.value,
+            reserved_tokens=sum(self._call_reservations.values()),
         ))
-        if self._session.usage.total_tokens > self._team.termination.token_budget:
-            self._finalize(SessionStatus.FAILED, fail_reason=FailReason.BUDGET)
 
     def _on_agent_fatal(self, agent: str, error: LLMError) -> None:
         """재시도 소진 오류 — dead 처리, 생존 부족 시 세션 실패 (귀책 기록)."""
@@ -620,3 +960,24 @@ class _Hooks:
 
     def on_fatal_error(self, agent: str, error: LLMError) -> None:
         self._m._on_agent_fatal(agent, error)
+
+    def on_exhausted(self, agent: str) -> None:
+        self._m._on_agent_exhausted(agent)
+
+    async def before_call(self, agent: str) -> bool:
+        return await self._m._before_agent_call(agent)
+
+    async def after_call(self, agent: str, usage: Usage) -> None:
+        await self._m._after_agent_call(agent, usage)
+
+    async def on_call_released(self, agent: str) -> None:
+        await self._m._release_agent_call(agent)
+
+    def tools_for(self, agent: str) -> frozenset[str]:
+        return self._m._tools_for_agent(agent)
+
+    def instruction_for(self, agent: str) -> str | None:
+        return self._m._instruction_for_agent(agent)
+
+    def retry_instruction(self, agent: str) -> str | None:
+        return self._m._retry_instruction_for_agent(agent)

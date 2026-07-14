@@ -218,6 +218,14 @@ class LLMConnectionError(LLMError):
     retryable = True
 
 
+class LLMRuntimeError(LLMError):
+    """어댑터 계약 밖 예외나 응답 형태 표류 — 시스템 구현 오류."""
+
+    blame = Blame.CLIENT
+    category = ErrorCategory.RUNTIME_ERROR
+    retryable = False
+
+
 # ---------------------------------------------------------------------------
 # 클라이언트 프로토콜
 # ---------------------------------------------------------------------------

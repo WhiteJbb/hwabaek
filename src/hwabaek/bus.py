@@ -12,6 +12,9 @@
   asyncio 단일 이벤트 루프에서 await 없이 완결되어야 원자성이 보장된다.
 - **관측 훅**: 배달된 모든 메시지는 on_message 콜백으로 통지된다 —
   SessionManager가 message 이벤트 발행·영속화·max_messages 판정에 사용.
+- **제어 알림**: 런타임 내부 알림은 메시지와 별도 큐에 두며 message sequence,
+  max_messages, on_message 관측에 포함하지 않는다. 메시지와 알림은 같은 깨움
+  이벤트를 공유하되, 두 큐가 모두 빌 때만 이벤트를 내린다.
 """
 from __future__ import annotations
 
@@ -48,8 +51,11 @@ class MessageBus:
         self._clock = clock
         self._id_factory = id_factory
         self._on_message = on_message
-        # 에이전트별 인박스와 도착 알림 이벤트. 불변식: event.is_set() ⇔ 인박스 비어있지 않음.
+        # 에이전트별 메시지/제어 알림 큐와 공용 깨움 이벤트.
+        # 불변식: event.is_set() ⇔ 두 큐 중 하나 이상이 비어 있지 않음.
         self._inboxes: dict[str, list[Message]] = {name: [] for name in self._agents}
+        self._notices: dict[str, list[str]] = {name: [] for name in self._agents}
+        self._inactive: set[str] = set()
         self._events: dict[str, asyncio.Event] = {
             name: asyncio.Event() for name in self._agents
         }
@@ -99,6 +105,28 @@ class MessageBus:
             self._on_message(message)
         return message
 
+    def post_notice(self, agent_name: str, content: str) -> None:
+        """에이전트 한 명에게 런타임 제어 알림을 넣고 대기자를 깨운다.
+
+        제어 알림은 도메인 메시지가 아니므로 id/sequence를 소비하지 않고
+        ``total_posted``나 ``on_message`` 관측에도 포함되지 않는다.
+        """
+        self._require_agent(agent_name)
+        if not isinstance(content, str) or not content:
+            raise ContractError("notice content must be a non-empty string")
+        if agent_name in self._inactive:
+            return
+        self._notices[agent_name].append(content)
+        self._events[agent_name].set()
+
+    def deactivate(self, agent_name: str) -> None:
+        """종료된 에이전트의 큐를 비우고 이후 배달 대상에서 제외한다."""
+        self._require_agent(agent_name)
+        self._inactive.add(agent_name)
+        self._inboxes[agent_name].clear()
+        self._notices[agent_name].clear()
+        self._events[agent_name].clear()
+
     def _deliver(self, message: Message) -> None:
         """배달 규칙 적용: 직접 수신자는 해당 인박스에만, 브로드캐스트는 발신자 제외 전원."""
         if message.is_broadcast:
@@ -108,6 +136,8 @@ class MessageBus:
         else:
             targets = message.recipients
         for target in targets:
+            if target in self._inactive:
+                continue
             inbox = self._inboxes[target]
             # 동일 id 중복 배달 무시(멱등) — 중복 수신자/방어적 재배달 대비.
             if any(existing.id == message.id for existing in inbox):
@@ -123,8 +153,8 @@ class MessageBus:
         SessionManager가 대기 중인 에이전트 태스크를 취소한다.
         """
         self._require_agent(agent_name)
-        # 이미 쌓인 메시지가 있으면 즉시 반환.
-        if self._inboxes[agent_name]:
+        # 이미 쌓인 메시지나 제어 알림이 있으면 즉시 반환.
+        if self._inboxes[agent_name] or self._notices[agent_name]:
             return
         # 없으면 다음 post가 이벤트를 set할 때까지 대기. CancelledError는 잡지 않는다.
         await self._events[agent_name].wait()
@@ -138,14 +168,28 @@ class MessageBus:
         # await 없는 동기 처리 — 단일 이벤트 루프에서 스냅샷·비움이 원자적이다.
         batch = sorted(inbox, key=lambda m: m.sequence)
         inbox.clear()
-        # 인박스가 비었으므로 알림 이벤트도 내린다(불변식 유지).
-        self._events[agent_name].clear()
+        # 제어 알림이 남아 있으면 공용 이벤트는 계속 set 상태여야 한다.
+        if not self._notices[agent_name]:
+            self._events[agent_name].clear()
+        return batch
+
+    def drain_notices(self, agent_name: str) -> list[str]:
+        """제어 알림 큐를 원자적으로 비워 삽입 순서대로 반환한다."""
+        self._require_agent(agent_name)
+        notices = self._notices[agent_name]
+        if not notices:
+            return []
+        batch = list(notices)
+        notices.clear()
+        # 메시지가 남아 있으면 공용 이벤트는 계속 set 상태여야 한다.
+        if not self._inboxes[agent_name]:
+            self._events[agent_name].clear()
         return batch
 
     def pending_count(self, agent_name: str) -> int:
-        """인박스에 대기 중인 메시지 수 — idle 판정 재료."""
+        """대기 중인 메시지와 제어 알림의 합계 — idle 판정 재료."""
         self._require_agent(agent_name)
-        return len(self._inboxes[agent_name])
+        return len(self._inboxes[agent_name]) + len(self._notices[agent_name])
 
     def total_posted(self) -> int:
         """세션에서 지금까지 발행된 메시지 총수 — max_messages 판정 재료."""
