@@ -121,11 +121,13 @@ class SessionManager:
         self._event_seq = 0
         self._done = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        self._agents: dict[str, AgentLoop] = {}
         self._vote_deadline: float | None = None
         self._budget_phase = BudgetPhase.DISCUSSION
         self._budget_condition = asyncio.Condition()
         self._call_reservations: dict[str, int] = {}
         self._call_phases: dict[str, BudgetPhase] = {}
+        self._call_proposal_ids: dict[str, str] = {}
         self._voting_attempts: dict[tuple[str, str], int] = {}
         self._decision_attempts: dict[tuple[BudgetPhase, int, str], int] = {}
         self._decision_unresponsive: set[str] = set()
@@ -183,6 +185,7 @@ class SessionManager:
                     hooks=_Hooks(self),
                     max_turns=spec.max_turns,
                 )
+                self._agents[spec.name] = agent
                 self._tasks.append(
                     asyncio.create_task(agent.run(), name=f"agent:{spec.name}")
                 )
@@ -406,6 +409,11 @@ class SessionManager:
                         self._decision_attempts[key] = attempts + 1
                     self._call_reservations[agent] = reserve
                     self._call_phases[agent] = self._budget_phase
+                    if self._budget_phase is BudgetPhase.VOTING:
+                        assert active is not None
+                        self._call_proposal_ids[agent] = active.proposal.id
+                    else:
+                        self._call_proposal_ids.pop(agent, None)
                     return True
 
                 if self._call_reservations:
@@ -520,6 +528,15 @@ class SessionManager:
         if state is not None:
             self._emit_vote_status(state)
             self._apply_outcome(state)
+
+    def _cancel_voting_calls(self, proposal_id: str) -> None:
+        """해소된 제안 버전을 검토 중인 호출만 취소하고 에이전트는 보존한다."""
+        for agent, call_proposal_id in tuple(self._call_proposal_ids.items()):
+            if call_proposal_id != proposal_id:
+                continue
+            loop = self._agents.get(agent)
+            if loop is not None:
+                loop.cancel_current_call()
 
     def _on_agent_exhausted(self, agent: str) -> None:
         """호출 상한을 소진한 에이전트를 큐와 향후 단계 대상에서 제외한다."""
@@ -667,10 +684,13 @@ class SessionManager:
             raise ToolError(
                 f"invalid decision {decision!r}: use approve or reject"
             ) from None
+        # proposal_id 생략은 호출 시작 당시 캡처한 제안에 귀속한다. 활성 제안으로
+        # 무조건 연결하면 늦은 v1 응답이 이미 열린 v2에 잘못 투표할 수 있다.
+        target_proposal_id = proposal_id or self._call_proposal_ids.get(sender, "")
         try:
-            if proposal_id:
+            if target_proposal_id:
                 result = self._consensus.register_vote_for(
-                    proposal_id, sender, vote_decision, reason
+                    target_proposal_id, sender, vote_decision, reason
                 )
             else:
                 # proposal_id 생략 = 활성 제안에 투표 (LLM의 id 오기입에 견고).
@@ -684,7 +704,7 @@ class SessionManager:
             active = self._consensus.active
             if active is not None:
                 return (
-                    f"vote ignored: proposal id {proposal_id!r} is stale or "
+                    f"vote ignored: proposal id {target_proposal_id!r} is stale or "
                     f"unknown. The ACTIVE proposal is {active.proposal.id} "
                     f"(version {active.proposal.version}, by "
                     f"{active.proposal.proposer}). Call vote_result again and "
@@ -715,6 +735,9 @@ class SessionManager:
             return
         if self._session.is_terminal:
             return
+        # participating_unanimous처럼 한 표로 제안이 즉시 해소될 수 있다. 남은
+        # 심의자의 해당 버전 호출을 끊어 예약과 네트워크 자원을 후속 단계에 돌린다.
+        self._cancel_voting_calls(state.proposal.id)
         if state.outcome is ProposalOutcome.APPROVED:
             self._complete(state)
         elif state.outcome is ProposalOutcome.REJECTED:

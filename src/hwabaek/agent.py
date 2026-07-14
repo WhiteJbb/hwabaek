@@ -232,6 +232,15 @@ class AgentLoop:
         self._turns: list[Turn] = []
         self._calls_made = 0
         self._dead = False
+        self._completion_task: asyncio.Task[LLMResponse] | None = None
+
+    def cancel_current_call(self) -> bool:
+        """진행 중인 LLM 호출만 취소하고 에이전트 루프는 다음 입력을 기다리게 한다."""
+        task = self._completion_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
 
     async def run(self) -> None:
         """루프 본체. 세션 종료 시 SessionManager가 태스크를 취소한다."""
@@ -314,8 +323,21 @@ class AgentLoop:
                 cache_system_prefix=True,
             )
             response: LLMResponse | None = None
+            completion = asyncio.create_task(
+                self._llm.complete(request),
+                name=f"llm:{self.name}",
+            )
+            self._completion_task = completion
             try:
-                response = await self._llm.complete(request)
+                response = await completion
+            except asyncio.CancelledError:
+                # 세션 종료가 outer AgentLoop 태스크를 취소한 경우에는 그대로
+                # 전파한다. 반면 현재 LLM 호출만 취소된 경우에는 루프를 살려 두어
+                # 다음 제안 버전의 알림을 받을 수 있게 한다.
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                return
             except LLMError as error:
                 # SDK 자체 재시도가 소진된 뒤 도달한다 — 세션에 귀책과 함께 보고하고
                 # 루프를 완전히 끝낸다(dead 에이전트는 인박스 소비도 중단).
@@ -330,6 +352,8 @@ class AgentLoop:
                 )
                 return
             finally:
+                if self._completion_task is completion:
+                    self._completion_task = None
                 if response is None:
                     release = getattr(self._hooks, "on_call_released", None)
                     if release is not None:

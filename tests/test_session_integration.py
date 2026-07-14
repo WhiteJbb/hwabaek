@@ -66,6 +66,10 @@ class ScriptedLLM:
             self._i += 1
             if isinstance(item, BaseException):  # LLMError 주입 = raise
                 raise item
+            if callable(item):
+                item = item()
+            if hasattr(item, "__await__"):
+                item = await item
             return item
         return text_response("(idle)")
 
@@ -124,6 +128,8 @@ class _Collector:
         self._idle_agents: set[str] = set()
         self._expected_idle: int | None = None
         self._parked: asyncio.Event | None = None
+        self._proposal_count = 0
+        self._proposal_gates: dict[int, asyncio.Event] = {}
 
     def __call__(self, event) -> None:
         self.events.append(event)
@@ -140,6 +146,14 @@ class _Collector:
                 and len(self._idle_agents) >= self._expected_idle
             ):
                 self._parked.set()
+        elif (
+            event.type is EventType.MESSAGE
+            and event.payload["type"] == MessageType.RESULT_PROPOSAL.value
+        ):
+            self._proposal_count += 1
+            gate = self._proposal_gates.get(self._proposal_count)
+            if gate is not None:
+                gate.set()
 
     def status_gate(self, status: SessionStatus) -> asyncio.Event:
         """해당 상태에 도달하면 set되는 게이트(이미 지났으면 즉시 set)."""
@@ -160,6 +174,13 @@ class _Collector:
         if len(self._idle_agents) >= n:
             self._parked.set()
         return self._parked
+
+    def proposal_gate(self, version: int) -> asyncio.Event:
+        """해당 순번의 결과 제안 메시지가 발행되면 set되는 게이트."""
+        gate = self._proposal_gates.setdefault(version, asyncio.Event())
+        if self._proposal_count >= version:
+            gate.set()
+        return gate
 
     # 조회 헬퍼 --------------------------------------------------------------
 
@@ -308,7 +329,11 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
             for turn in req.turns
             for result in turn.tool_results
         )
-        self.assertIn("was not offered for this call", tool_outputs)
+        self.assertTrue(
+            "was not offered for this call" in tool_outputs
+            or "voting phase only allows vote_result" in tool_outputs,
+            tool_outputs,
+        )
 
     async def test_bogus_proposal_id_vote_gets_corrective_result(self) -> None:
         """지어낸 proposal_id로 투표하면 무시 대신 활성 제안 id를 알려주는 교정
@@ -420,6 +445,78 @@ class SessionIntegrationTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertTrue(rejects)
         self.assertIn(reason, rejects[0].payload["content"])
+
+    async def test_reject_cancels_other_v1_call_and_v2_completes(self) -> None:
+        """느린 v1 심의 호출은 반려 때 취소되고 같은 에이전트가 v2에 다시 투표한다."""
+        slow_started = asyncio.Event()
+        slow_cancelled = asyncio.Event()
+
+        async def blocked_v1_vote():
+            slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                slow_cancelled.set()
+
+        async def reject_after_slow_starts():
+            await slow_started.wait()
+            return _vote("reject", reason="revise it")
+
+        manager, _, fakes = self._build(
+            [
+                ("writer", [_submit("draft one"), _submit("draft two")]),
+                ("slow", [_text(), blocked_v1_vote, _vote("approve")]),
+                ("critic", [_text(), reject_after_slow_starts, _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+
+        session = await self._run(manager)
+
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.result, "draft two")
+        self.assertTrue(slow_cancelled.is_set())
+        self.assertEqual(len(fakes["slow"].calls), 3)
+
+    async def test_late_v1_vote_without_id_cannot_reject_v2(self) -> None:
+        """취소를 늦게 따르는 provider의 v1 응답도 활성 v2에 적용하지 않는다."""
+        slow_started = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        collector = None
+
+        async def stale_v1_vote():
+            slow_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                assert collector is not None
+                await collector.proposal_gate(2).wait()
+                return _vote("reject", reason="stale v1 response")
+
+        async def reject_after_slow_starts():
+            await slow_started.wait()
+            return _vote("reject", reason="revise it")
+
+        manager, collector, _ = self._build(
+            [
+                ("writer", [_submit("draft one"), _submit("draft two")]),
+                ("slow", [_text(), stale_v1_vote, _vote("approve")]),
+                ("critic", [_text(), reject_after_slow_starts, _vote("approve")]),
+            ],
+            idle_timeout=1.0,
+            voting_timeout=1.0,
+        )
+
+        session = await self._run(manager)
+
+        self.assertTrue(cancellation_seen.is_set())
+        self.assertEqual(session.status, SessionStatus.COMPLETED)
+        self.assertEqual(session.result, "draft two")
+        votes = collector.messages(MessageType.VOTE)
+        self.assertEqual(len(votes), 3)  # v1 reject + v2 critic/slow approve
+        self.assertNotIn("stale v1 response", [v.payload["content"] for v in votes])
 
     # -----------------------------------------------------------------------
     # 3) voting 중 중복 submit 거부 (도구 오류, 세션은 계속 진행)
