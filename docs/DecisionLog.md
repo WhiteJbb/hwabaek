@@ -361,6 +361,60 @@
   (빈 capabilities) 에이전트도 계약상 허용.
 - **결정자**: 사용자 (구조·프롬프트), Claude (계약 통합 방식).
 
+## D-028 (2026-07-14) 이벤트 taxonomy: 6개 집계 타입 유지 (세분 enum 미도입)
+
+- **상태**: 채택 (D-022의 "M2에서 확정" 이행).
+- **맥락**: D-022에서 도메인 이벤트 세분 taxonomy(session.*, agent.*, proposal.*,
+  vote.*, limit.*)를 EventContract §8에 후보로 두고 M2 발행 지점 구현과 함께
+  확정하기로 했다. M2a가 6개 집계 EventType(session_status/message/agent_state/
+  usage/vote_status/result)으로 완결 동작하며 대시보드 계약(EventContract §3)도
+  이 위에 서 있다.
+- **결정**: **6개 집계 타입을 확정 와이어 계약으로 유지**한다. 세분 enum을 새로
+  도입하지 않고, 세분 의미(예: proposal.rejected vs approved)는 기존 payload
+  필드(session_status의 status/fail_reason, vote_status의 tally, agent_state의
+  state/detail)로 표현한다. EventContract §8의 후보 목록은 "payload로 식별되는
+  논리적 이벤트"의 참고 매핑으로 남긴다.
+- **대안**: (a) EventType을 ~20종으로 확장 — 대시보드·저장·테스트 계약을 지금
+  churn시키고 얻는 것이 payload 중복뿐, (b) 이중 표기(집계 + 세분) — 복잡도만 증가.
+- **선택 이유**: 이미 동작하는 최소 계약을 흔들지 않는다(과설계 회피 원칙).
+  세분이 실제로 필요한 소비자(예: limit.warning 알림)가 M4 대시보드에서
+  등장하면 그때 payload 필드 추가 또는 신규 타입으로 확장 — 봉투는 이미 호환.
+- **결과와 트레이드오프**: limit.warning(예산 임박 경고)은 현재 별도 이벤트가
+  없다 — 필요 시 usage 이벤트 소비자가 token_budget 대비 비율로 판단하거나 M4에서
+  추가. EventContract §8을 "확정: 집계 유지"로 갱신.
+- **결정자**: Claude 제안 (M2 실동작 근거).
+
+## D-028 (2026-07-14) 도메인 이벤트 taxonomy: 현행 6개 집계 타입을 최종 계약으로 채택
+
+- **상태**: 채택 (D-022의 이월 항목 해소).
+- **맥락**: D-022는 세분 taxonomy(session.*, agent.*, proposal.*, vote.*, limit.*)
+  확정을 "발행 지점 구현과 함께"로 미뤘다. M2a에서 모든 발행 지점(SessionManager)이
+  구현되어 판단 근거가 생겼다.
+- **결정**: **세분 dotted taxonomy를 채택하지 않고 현행 6개 집계 타입**
+  (session_status / message / agent_state / usage / vote_status / result)을 최종
+  SSE·영속화 계약으로 확정한다. EventContract §8의 후보 목록은 매핑 참고 표로만
+  유지한다.
+- **대안**: ~20개 세분 타입으로 확장 — 발행 지점 구현 결과, 세분 정보가 전부
+  payload에 이미 존재함이 확인됨 (agent.dead = agent_state{state:dead, detail},
+  proposal.approved = vote_status+result, limit.warning = usage payload의
+  budget 대비 비율로 대시보드가 계산 가능). 타입 확장은 계약·테스트·문서 전반의
+  churn 대비 소비자(대시보드 M4) 이득이 없음.
+- **선택 이유**: "실제로 필요한 최소 범위" 원칙. 봉투(event_id/sequence)는 이미
+  세분화와 호환되므로, M4 대시보드나 M6 확장에서 세분 타입이 실제로 필요해지면
+  추가 확장으로 재개정 가능(하위 호환).
+- **결과와 트레이드오프**: 이벤트 소비자는 타입+payload 필드 조합으로 상황을
+  판별해야 함(문서화됨). 계약 churn 0.
+- **결정자**: Claude 제안 — 사용자 이의 시 M2b PR 리뷰에서 재개정.
+
+## D-029 (2026-07-14) SQLite 접근 방식: 표준 sqlite3 + asyncio.to_thread
+
+- **상태**: 채택.
+- **맥락**: Research §5 미조사 항목 — aiosqlite vs 표준 sqlite3+to_thread.
+- **결정**: 표준 라이브러리 sqlite3를 asyncio.to_thread로 감싼다. 신규 의존성 0,
+  단일 세션·로컬 파일 규모(M2b)에 충분. 요청 경로 블로킹은 SessionManager의
+  write-behind 큐(단일 라이터, 종료 시 flush)가 차단한다.
+- **대안**: aiosqlite — 의존성 추가 대비 이득 없음(내부적
+
 ## D-012 (2026-07-14) 대시보드 접근: localhost 전용
 
 - **결정**: 서버는 `127.0.0.1`에만 바인딩하고 인증은 두지 않는다.

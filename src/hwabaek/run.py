@@ -131,6 +131,12 @@ async def _run(args: argparse.Namespace) -> int:
         team = load_team_config(args.team)
         llm_factory = _real_llm_factory()
 
+    store = None
+    if not args.no_db:
+        from hwabaek.store.sqlite import SQLiteStore
+
+        store = SQLiteStore(args.db)
+
     manager = SessionManager(
         team,
         args.task,
@@ -138,8 +144,13 @@ async def _run(args: argparse.Namespace) -> int:
         clock=_clock,
         id_factory=_make_id_factory(),
         on_event=_print_event,
+        store=store,
     )
-    session = await manager.run()
+    try:
+        session = await manager.run()
+    finally:
+        if store is not None:
+            await store.close()
 
     print("-" * 60)
     print(f"status: {session.status.value}"
@@ -153,6 +164,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"unratified draft (by {session.draft_proposer}):")
         print(session.draft_result)
     print(f"tokens: {session.usage.total_tokens}")
+    if store is not None:
+        print(f"session {session.id} stored in {args.db}")
     return 0 if session.status is SessionStatus.COMPLETED else 1
 
 
@@ -169,6 +182,14 @@ def main() -> None:
     parser.add_argument(
         "--fake", action="store_true",
         help="hermetic smoke run with a scripted fake LLM (no network, no key)",
+    )
+    parser.add_argument(
+        "--db", default="data/hwabaek.db",
+        help="sqlite path for session records (default: data/hwabaek.db)",
+    )
+    parser.add_argument(
+        "--no-db", action="store_true",
+        help="disable persistence for this run",
     )
     args = parser.parse_args()
     sys.exit(asyncio.run(_run(args)))
