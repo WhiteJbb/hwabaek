@@ -144,6 +144,10 @@ py -m venv .venv
     강제됩니다 — 응답 1건이 예산을 초과해 끝날 수 있습니다.
   - gpt-5.6의 구독 백엔드 지원, 스트리밍(stream)/accept 헤더 강제 여부는 아직
     실계정으로 검증되지 않았습니다 — 첫 실사용에서 오류가 나면 이슈로 남겨주세요.
+  - 로그인 시 "Codex용 장치 코드 인증을 활성화" 안내가 나오면: ChatGPT 계정은
+    장치 코드 인증이 기본 비활성입니다. chatgpt.com → 설정 → 보안에서 장치 코드
+    인증을 켠 뒤 `python -m hwabaek.llm.chatgpt_auth login`을 다시 실행하세요
+    (Team/Enterprise는 워크스페이스 관리자 허용이 필요할 수 있음).
   - 토큰 파일(`~/.hwabaek/chatgpt_token.json`)은 Windows에서 사용자 프로필 ACL에
     의존합니다. 경로는 `HWABAEK_CHATGPT_AUTH_FILE`로 재정의할 수 있습니다.
 - 서버는 localhost(127.0.0.1) 전용이며, 세션은 동시에 1개만 실행됩니다.
