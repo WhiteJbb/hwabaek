@@ -101,11 +101,14 @@
      초안은 수령. no_quorum 실패 시 fail_detail에 **미투표/기권자 목록 기록 필수**
      (실패 사유가 가장 뭉개지기 쉬운 경로).
 6. **종료 원자성 (D-021)**: 여러 종료 조건이 동시에 발생해도(마지막 투표 vs 예산
-   초과, 취소 vs 승인 등) 종료는 **한 번만** 확정된다 — 세션 단위 lock으로 전환을
-   직렬화하고 최초 유효 사유만 저장. 경합 우선순위:
-   `cancelled → completed → budget/messages → agent_error → no_quorum → idle`
-   (실제 경쟁 조건에서의 필요성은 M2 테스트로 재검증). 종료 후 도착한
-   메시지·제안·투표는 상태를 바꾸지 못하며 감사용 rejected event로 기록할 수 있다.
+   초과, 취소 vs 승인 등) 종료는 **한 번만** 확정된다 — SessionManager가 단일
+   asyncio 이벤트 루프의 동기 블록에서 전환을 수행하고(`_finalize`의 is_terminal
+   가드), 최초로 도달한 유효 사유만 저장한다(first-wins). 초기 설계의 결정론적
+   경합 우선순위표(`cancelled → completed → budget/messages → agent_error →
+   no_quorum → idle`)는 구현하지 않았다 — 밀폐 테스트 기준 first-wins로 충분했고,
+   실제 경쟁 조건에서 사유 비결정성이 문제로 재현되면 도입을 재검토한다(미결).
+   종료 후 도착한 메시지·제안·투표는 상태를 바꾸지 못하며 감사용 rejected
+   기록으로 남는다.
 7. **서버 재시작 (D-021)**: 시작 시 저장소의 이전 running/voting 세션을
    **failed(interrupted)**로 일괄 처리한다. 완료·실패·취소 세션과 의결 기록은
    조회 가능해야 하며, 실행 중 세션의 완전 복원은 M5 이후로 유보.
@@ -115,22 +118,27 @@
 ```
 src/hwabaek/
   contracts.py        # M1: 메시지/에이전트/팀/세션 스키마 (dataclass + 검증)
+  config.py           # M1: 팀 설정 YAML 로더 + 검증
   bus.py              # M2: 비동기 메시지 버스 (에이전트별 인박스)
   agent.py            # M2: 에이전트 런타임 (LLM 툴 루프)
   consensus.py        # M2: ConsensusEngine — 제안/투표/정족수 판정만 반환 (D-016/D-021)
   session.py          # M2: SessionManager — 상태 전환 직렬화 + 타이머 2종 + 예산/생존 관리
+  run.py              # M2a: CLI smoke 진입점 (python -m hwabaek.run)
+  serve.py            # M3: 서버 진입점 (python -m hwabaek.serve)
   store/
     base.py           # M1: Store Protocol (저장 계약) — D-017, 확정됨
     sqlite.py         # M2b: SQLite 구현 (ORM 금지, write-behind)
   llm/
     base.py           # M1: LLM 클라이언트 계약 (프로바이더 중립 Protocol) — D-009
+    fake.py           # M1: 테스트 대역 (밀폐 테스트용 Fake LLM)
     openai_client.py  # M2: openai SDK 어댑터 (재시도/스트리밍/캐싱/키 마스킹)
+    chatgpt_auth.py   # M2b: chatgpt_oauth device flow (D-026)
     anthropic_client.py  # 후순위: anthropic SDK 어댑터
   server/
     app.py            # M3: FastAPI 조립
     api.py            # M3: REST (세션 생성/조회/취소, 팀 설정 조회)
     events.py         # M3: SSE 이벤트 스트림
-  dashboard/          # M4: 정적 웹 UI (HTML/JS, FastAPI가 서빙)
+  dashboard/          # M4: 정적 웹 UI (HTML/CSS/JS, FastAPI가 /app/에서 서빙)
 configs/
   team.quick.yaml     # 빠른 2인 판단 (작업 25k)
   team.default.yaml   # 표준 대등 3인 구조 (작업 60k)
@@ -222,9 +230,10 @@ tests/                # 단위 + 통합 (Fake LLM 클라이언트로 밀폐)
 
 ### M3 — 서버 (완료: 2026-07-14)
 - REST: `POST /sessions`(태스크 제출 — 동시 세션 1개 검사와 생성을 원자적으로),
-  `GET /sessions/{id}`, `POST /sessions/{id}/cancel`, `GET /teams`(팀 설정 목록),
-  저장된 세션 조회(완료/실패/취소 세션·메시지 타임라인·제안/투표·의결문·사용량 —
-  store 기반).
+  `GET /sessions`(목록, limit 기본 50/상한 200), `GET /sessions/{id}`,
+  `POST /sessions/{id}/cancel`, `GET /teams`(팀 설정 목록), `GET /health`
+  (대시보드 연결 상태 폴링용), 저장된 세션 조회(완료/실패/취소 세션·메시지
+  타임라인·제안/투표·의결문·사용량 — store 기반).
 - SSE: `GET /sessions/{id}/events` — 이벤트 실시간 스트림, `Last-Event-ID`(sequence)
   호환 (EventContract §5).
 - 서버 시작 시 이전 running/voting 세션을 failed(interrupted)로 처리 (D-021).

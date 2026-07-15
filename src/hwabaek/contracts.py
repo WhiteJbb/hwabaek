@@ -825,9 +825,9 @@ class Session:
     """태스크 1건의 수명주기. 상태 전이는 with_status()로만 수행한다.
 
     종료 원자성 (D-021): 여러 종료 조건이 동시에 발생해도 종료는 한 번만
-    확정된다 — SessionManager가 세션 단위 lock으로 전환을 직렬화하고, 최초로
-    확정된 유효 종료 사유만 저장한다. 경합 시 우선순위는
-    cancelled → completed → budget/messages → agent_error → no_quorum → idle.
+    확정된다 — SessionManager가 단일 이벤트 루프의 동기 블록에서 전환을
+    수행하고(_finalize의 is_terminal 가드), 최초로 도달한 유효 종료 사유만
+    저장한다(first-wins). 별도 lock 객체나 경합 우선순위 중재는 두지 않는다.
     종료 후 도착한 이벤트는 상태를 바꾸지 못하며 감사용 rejected event로
     기록할 수 있다. 이 계약의 종료 상태 전이 금지 표가 최종 방어선이다.
 
